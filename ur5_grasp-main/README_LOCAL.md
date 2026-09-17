@@ -78,3 +78,18 @@ D435i 检出的相机坐标会通过 `cam2end_20260906.txt` 和实时 TCP 转换
 会标记 `preview only`。日志中的 `robot_motion_authorized` 始终为 `false`。
 如果机械臂网络不可达，程序仍会运行两个相机窗口，但 D435i 只显示相机坐标，
 不会进行跨相机关联。
+
+## 双相机相对校正
+
+先在中心、左、右、上、下五个位置各记录至少3条有效数据，然后打开并运行
+`calibrate_camera_alignment.py`。脚本会自动选择 `outputs/validation` 中最新的
+`measurements_*.jsonl`，对每个位置取中位数，并生成：
+
+```text
+ur5_grasp-main/camera_alignment.json
+```
+
+主程序下次启动时会自动加载该文件。D455窗口显示 `aligned` 坐标，关联状态
+显示 `aligned delta`；日志同时保存原始 `base_xyz_m` 和校正后的
+`base_xyz_aligned_m`。校正只用于双相机目标关联，不覆盖原始坐标，也不授权
+机械臂运动。应使用一轮新的位置数据验证校正效果，不能只看拟合数据。

@@ -5,3 +5,4 @@ __py
 **/__pycache__/
 .venv/
 outputs/
+ur5_grasp-main/camera_alignment.json

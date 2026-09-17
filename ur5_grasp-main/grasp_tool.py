@@ -35,6 +35,7 @@ from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
+from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
 
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -67,6 +68,7 @@ CALIB_PATH = str(SCRIPT_ROOT / "camera_pose.txt")
 DEPTH_SCALE_FILE = str(SCRIPT_ROOT / "camera_depth_scale.txt")
 CAM_INI = str(SCRIPT_ROOT / "camera_20260906.ini")
 CAM2END_PATH = str(SCRIPT_ROOT / "cam2end_20260906.txt")
+CAMERA_ALIGNMENT_PATH = SCRIPT_ROOT / "camera_alignment.json"
 
 # 手外 D455 内参（与 camera_pose.txt 标定时所用一致）
 HO_FX = 386.471
@@ -146,6 +148,15 @@ def main():
     ho = HandOutEyeCalibration(robot=ParamHolder(), calib_path=CALIB_PATH,
                                cam_depth_scale=depth_scale)
     print("[OK] 手外标定加载完成 (camera_pose.txt, cam->base, 米)")
+    try:
+        camera_alignment = load_alignment(CAMERA_ALIGNMENT_PATH)
+    except Exception as exc:
+        camera_alignment = None
+        print("[校正文件无效] 使用D455原始坐标：%s" % exc)
+    if camera_alignment is None:
+        print("[双相机校正] 未加载，目标关联使用D455原始坐标。")
+    else:
+        print("[双相机校正] 已加载:", CAMERA_ALIGNMENT_PATH)
 
     detector = SamToolDetector(TEXT_PROMPT)
     ho_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
@@ -156,7 +167,8 @@ def main():
     cv2.namedWindow(win_ho, cv2.WINDOW_NORMAL)
     cv2.namedWindow(win_hi, cv2.WINDOW_NORMAL)
 
-    state = {"ho_base": None, "hi_base": None, "association": None}
+    state = {"ho_base": None, "ho_base_aligned": None,
+             "hi_base": None, "association": None}
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -181,6 +193,7 @@ def main():
             ho_disp = detector.draw(ho_color, res_ho)
             cv2.rectangle(ho_disp, D455_ROI[:2], D455_ROI[2:], (255, 180, 0), 1)
             state["ho_base"] = None
+            state["ho_base_aligned"] = None
             ho_coord = None
             ho_gate = gate_detection(res_ho, ho_status, "D455")
             if res_ho is not None and ho_status == "STABLE":
@@ -188,9 +201,15 @@ def main():
                 if pt is not None:
                     x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
                     state["ho_base"] = (x, y, z)
+                    state["ho_base_aligned"] = (
+                        apply_alignment(state["ho_base"], camera_alignment)
+                        if camera_alignment is not None else state["ho_base"])
                     ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
-                    ho_coord = "%s  base [%.3f, %.3f, %.3f]" % (
-                        "PASS" if ho_gate["passed"] else "REJECT", x, y, z)
+                    ax, ay, az = state["ho_base_aligned"]
+                    coord_kind = "aligned" if camera_alignment is not None else "raw"
+                    ho_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
+                        "PASS" if ho_gate["passed"] else "REJECT",
+                        coord_kind, ax, ay, az)
             position_text = active_position.upper() if active_position else "PRESS 1-5"
             sample_count = position_counts.get(active_position, 0)
 
@@ -231,8 +250,9 @@ def main():
                         coord_name = "HI camera"
                     hi_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
                         "PASS" if hi_gate["passed"] else "REJECT", coord_name, x, y, z)
-            association = associate_targets(state["ho_base"], state["hi_base"],
-                                            ho_gate, hi_gate)
+            association = associate_targets(
+                state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
+                alignment_applied=camera_alignment is not None)
             state["association"] = association
             association_text = association_status_text(association)
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
@@ -252,6 +272,7 @@ def main():
                     position_label=active_position,
                     ho_result=res_ho,
                     ho_base=state["ho_base"],
+                    ho_base_aligned=state["ho_base_aligned"],
                     hi_result=res_hi,
                     hi_camera=hi_camera,
                     hi_base=state["hi_base"],
@@ -328,7 +349,7 @@ def draw_header(image, camera_name, status, coordinate=None, gate_reason=None,
                     0.46, color, 1, cv2.LINE_AA)
 
 
-def associate_targets(ho_base, hi_base, ho_gate, hi_gate):
+def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=False):
     """Compare independent base-frame estimates; never authorize robot motion."""
     result = {
         "available": False,
@@ -337,6 +358,7 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate):
         "target_base_xyz_m": None,
         "approach_base_xyz_m": None,
         "robot_motion_authorized": False,
+        "alignment_applied": bool(alignment_applied),
     }
     if not (ho_gate["passed"] and hi_gate["passed"]):
         result["reason"] = "waiting for both validation gates"
@@ -366,9 +388,10 @@ def association_status_text(association):
     if not association["available"]:
         return "ASSOCIATION WAITING: " + association.get("reason", "unavailable")
     distance_mm = association["distance_m"] * 1000.0
+    source = "aligned" if association.get("alignment_applied") else "raw"
     if association["matched"]:
-        return "SAME TARGET  delta=%.1fmm  preview only" % distance_mm
-    return "TARGET MISMATCH  delta=%.1fmm" % distance_mm
+        return "SAME TARGET  %s delta=%.1fmm  preview only" % (source, distance_mm)
+    return "TARGET MISMATCH  %s delta=%.1fmm" % (source, distance_mm)
 
 
 def gate_detection(result, tracking_status, camera_name, base_xyz=None):
@@ -420,7 +443,8 @@ def _serializable_result(result):
 
 
 def append_validation_measurement(log_path, session_id, position_label,
-                                  ho_result, ho_base, hi_result, hi_camera,
+                                  ho_result, ho_base, ho_base_aligned,
+                                  hi_result, hi_camera,
                                   hi_base=None, tcp_pose=None, association=None):
     """Append one compact record; JSONL survives interruption and is easy to compare."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +462,8 @@ def append_validation_measurement(log_path, session_id, position_label,
             "serial": HO_SERIAL,
             "result": _serializable_result(ho_result),
             "base_xyz_m": [float(v) for v in ho_base] if ho_base is not None else None,
+            "base_xyz_aligned_m": ([float(v) for v in ho_base_aligned]
+                                   if ho_base_aligned is not None else None),
         },
         "d435i": {
             "serial": HI_SERIAL,
