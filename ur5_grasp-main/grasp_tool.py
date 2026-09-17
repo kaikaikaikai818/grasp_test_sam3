@@ -45,6 +45,8 @@ ENABLE_ROBOT_STATE_READ = True  # 只读TCP位姿；不会创建机械臂控制�
 # 安全观察点测试：仅按 P 后移动到目标上方；不初始化夹爪、不下降、不抓取。
 # 它与 ENABLE_ROBOT_GRASP 互斥，默认关闭。
 ENABLE_SAFE_APPROACH_TEST = False
+# 无接触下降测试：只在观察点确认后按 D 低速下降到工具上方；默认关闭。
+ENABLE_SAFE_DESCENT_TEST = False
 # D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
 D455_ROI = (130, 80, 530, 420)
 STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
@@ -65,6 +67,11 @@ SAFE_APPROACH_ACCELERATION = 0.03
 # 观察点后的抓取预览：只显示计划，不会产生任何运动命令。
 GRASP_PREVIEW_HEIGHT_M = 0.10
 GRASP_PREVIEW_SURFACE_CLEARANCE_M = 0.025
+# 第一次实体下降保留更大的 40mm 间隙，不使用虚拟预览的 25mm 终点。
+SAFE_DESCENT_CLEARANCE_M = 0.040
+SAFE_DESCENT_CONFIRM_FRAMES = 3
+SAFE_DESCENT_SPEED = 0.01
+SAFE_DESCENT_ACCELERATION = 0.01
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -121,6 +128,8 @@ def main():
     args = parse_args()
     if ENABLE_ROBOT_GRASP and ENABLE_SAFE_APPROACH_TEST:
         raise RuntimeError("ENABLE_ROBOT_GRASP 与 ENABLE_SAFE_APPROACH_TEST 不能同时开启")
+    if ENABLE_SAFE_DESCENT_TEST and not ENABLE_SAFE_APPROACH_TEST:
+        raise RuntimeError("ENABLE_SAFE_DESCENT_TEST 需要先开启 ENABLE_SAFE_APPROACH_TEST")
     robot_control_enabled = ENABLE_ROBOT_GRASP or ENABLE_SAFE_APPROACH_TEST
 
     # 1. 机器人（手内相机 + 夹爪）
@@ -190,6 +199,7 @@ def main():
     approach_destination = None
     d455_detection_frozen = False
     observation_active = False
+    descent_ready_streak = 0
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -205,6 +215,9 @@ def main():
         print("      仅当双相机连续 %d 帧一致且误差≤%.0fmm 时允许执行。"
               % (SAFE_APPROACH_CONFIRM_FRAMES,
                  SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0))
+    if ENABLE_SAFE_DESCENT_TEST:
+        print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
+              % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
     print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
@@ -299,8 +312,13 @@ def main():
                 approach_ready_streak = 0
             grasp_preview = build_grasp_preview(
                 state["hi_base"], hi_gate, observation_active)
+            if observation_active and grasp_preview.get("ready"):
+                descent_ready_streak += 1
+            else:
+                descent_ready_streak = 0
             if observation_active:
-                association_text = grasp_preview_status_text(grasp_preview)
+                association_text = grasp_preview_status_text(
+                    grasp_preview, ENABLE_SAFE_DESCENT_TEST, descent_ready_streak)
                 draw_grasp_preview(hi_disp, res_hi, grasp_preview)
             else:
                 association_text = association_status_text(
@@ -377,6 +395,18 @@ def main():
                         ho_filter.reset()
                         print("[观察点] 已暂停D455目标检测，避免移动中的夹爪被识别为工具。")
                         print("[抓取预览] D435i 将持续显示预抓取点和虚拟下降终点；不会发送运动或夹爪命令。")
+            elif key == ord('d'):
+                if not ENABLE_SAFE_DESCENT_TEST:
+                    print("[安全锁定] 将 ENABLE_SAFE_DESCENT_TEST 改为 True 后才允许无接触下降测试。")
+                elif not observation_active:
+                    print("[安全锁定] 请先完成 P 键安全观察点移动。")
+                elif not grasp_preview.get("ready"):
+                    print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
+                elif descent_ready_streak < SAFE_DESCENT_CONFIRM_FRAMES:
+                    print("[安全锁定] D435i 稳定帧不足：%d/%d。" %
+                          (descent_ready_streak, SAFE_DESCENT_CONFIRM_FRAMES))
+                else:
+                    move_to_safe_descent_test(robot, grasp_preview)
             elif key == ord('g'):
                 if ENABLE_ROBOT_GRASP:
                     do_grasp(robot, detector, state)
@@ -539,10 +569,17 @@ def build_grasp_preview(hi_base, hi_gate, observation_active):
     return preview
 
 
-def grasp_preview_status_text(preview):
+def grasp_preview_status_text(preview, safe_descent_enabled=False, ready_streak=0):
     if not preview.get("ready"):
         return "GRASP PREVIEW: " + preview.get("reason", "waiting")
     endpoint = preview["endpoint_xyz_m"]
+    if safe_descent_enabled:
+        if ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES:
+            return "SAFE DESCENT READY %d/%d: press D, stop %.0fmm above tool" % (
+                ready_streak, SAFE_DESCENT_CONFIRM_FRAMES,
+                SAFE_DESCENT_CLEARANCE_M * 1000.0)
+        return "SAFE DESCENT CHECK %d/%d: D435i must remain stable" % (
+            ready_streak, SAFE_DESCENT_CONFIRM_FRAMES)
     return "GRASP PREVIEW ONLY: end [%.3f, %.3f, %.3f], descend %.0fmm" % (
         endpoint[0], endpoint[1], endpoint[2], preview["descent_m"] * 1000.0)
 
@@ -811,6 +848,69 @@ def move_to_safe_observation(robot, destination_xyz):
         return True
     except Exception as exc:
         print("[安全中止] 安全观察点移动失败：%s" % exc)
+        try:
+            if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
+                robot.rtde_c.stopL(1.0)
+        except Exception as stop_exc:
+            print("[提示] 无法发送停止命令，请用示教器检查：%s" % stop_exc)
+        return False
+
+
+def move_to_safe_descent_test(robot, preview):
+    """Perform one slow no-contact descent; never touch the tool or use the gripper."""
+    if not preview.get("ready"):
+        print("[安全中止] 无有效D435i预览，拒绝无接触下降。")
+        return False
+    target = np.asarray(preview["target_surface_xyz_m"], dtype=np.float64)
+    pregrasp = np.asarray(preview["pregrasp_xyz_m"], dtype=np.float64)
+    stop_point = target.copy()
+    stop_point[2] += SAFE_DESCENT_CLEARANCE_M
+    if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
+        print("[安全中止] 无接触下降路径超出工作空间。")
+        return False
+    if stop_point[2] >= pregrasp[2]:
+        print("[安全中止] 无接触终点不低于预抓取点，拒绝执行。")
+        return False
+
+    try:
+        current = _read_valid_tcp_pose(robot)
+        if current[2] < SAFE_TRAVEL_Z_M - 0.005:
+            print("[安全中止] 当前TCP不在安全观察高度，拒绝下降测试。")
+            return False
+        if not verify_tool_orientation(robot, "无接触下降前"):
+            return False
+
+        # Horizontal correction happens only at the already verified high point.
+        high_align = current.copy()
+        high_align[0:2] = target[0:2]
+        high_align[2] = max(float(current[2]), SAFE_TRAVEL_Z_M)
+        high_align[3:6] = TOOL_ORIENTATION
+        print("[无接触下降] 安全高度对准 XY=%s" %
+              ["%.4f" % value for value in high_align[0:3]])
+        robot.moveL(high_align.tolist(), speed=SAFE_DESCENT_SPEED,
+                    acceleration=SAFE_DESCENT_ACCELERATION)
+
+        pregrasp_pose = pregrasp.tolist() + TOOL_ORIENTATION
+        print("[无接触下降] 下降到预抓取高度=%s" %
+              ["%.4f" % value for value in pregrasp_pose])
+        robot.moveL(pregrasp_pose, speed=SAFE_DESCENT_SPEED,
+                    acceleration=SAFE_DESCENT_ACCELERATION)
+        if not verify_tool_orientation(robot, "预抓取高度"):
+            return False
+
+        stop_pose = stop_point.tolist() + TOOL_ORIENTATION
+        print("[无接触下降] 低速停在目标上方 %.0fmm=%s" % (
+            SAFE_DESCENT_CLEARANCE_M * 1000.0,
+            ["%.4f" % value for value in stop_pose]))
+        robot.moveL(stop_pose, speed=SAFE_DESCENT_SPEED,
+                    acceleration=SAFE_DESCENT_ACCELERATION)
+        if not verify_tool_orientation(robot, "无接触终点"):
+            return False
+        print("[无接触下降完成] 已停在目标上方 %.0fmm；未接触工具、未控制夹爪。" %
+              (SAFE_DESCENT_CLEARANCE_M * 1000.0))
+        return True
+    except Exception as exc:
+        print("[安全中止] 无接触下降失败：%s" % exc)
         try:
             if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
                 robot.rtde_c.stopL(1.0)

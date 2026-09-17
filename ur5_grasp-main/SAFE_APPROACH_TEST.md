@@ -38,3 +38,16 @@ ENABLE_SAFE_APPROACH_TEST = True
 当 D435i 稳定识别目标时，标题栏会显示 `GRASP PREVIEW ONLY`：预抓取点位于测得顶面上方 100 mm，虚拟下降终点保持在顶面上方 25 mm，整个虚拟下降为 75 mm。它们只用于下一阶段的路径验收，不会发送运动或夹爪命令。按 `Q` 只退出程序；它也不会自动回原位。
 
 完成测试后，请把 `ENABLE_SAFE_APPROACH_TEST` 改回 `False`。
+
+## 无接触下降测试（下一阶段）
+
+先保持 `ENABLE_ROBOT_GRASP = False`，再额外设置：
+
+```python
+ENABLE_SAFE_APPROACH_TEST = True
+ENABLE_SAFE_DESCENT_TEST = True
+```
+
+先按 P 到观察点。D435i 连续 3 帧稳定后，窗口会显示 `SAFE DESCENT READY 3/3`。点击相机窗口并按 `D`，机械臂只会：在当前安全高度对准 D435i 的实时 XY，低速降到预抓取高度，然后停在测得工具顶面上方 40 mm。
+
+此测试不接触工具，不控制夹爪，也不会自动回位。首次实体测试完成前，不要把 `SAFE_DESCENT_CLEARANCE_M` 从 `0.040` 调低。
