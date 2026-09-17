@@ -17,9 +17,11 @@
   --gripper-test 交互式校定夹爪开/合 position
 """
 import argparse
+import json
 import os
 import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -40,6 +42,13 @@ ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
 # D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
 D455_ROI = (130, 80, 530, 420)
 STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
+# 视觉验收门槛。这里只决定坐标是否值得记录，不会授权机械臂运动。
+D455_MIN_SCORE = 0.35
+D435I_MIN_SCORE = 0.45
+MIN_BOX_SIDE_PX = 12
+MIN_VALID_DEPTH_POINTS = 80
+MEASUREMENT_LOG_INTERVAL_S = 2.0
+VALIDATION_LOG = SCRIPT_ROOT.parent / "outputs" / "validation" / "measurements.jsonl"
 ROBOT_IP = "192.168.1.35"
 HI_SERIAL = "215222074676"     # 手内 D435I（机器人内置相机）
 HO_SERIAL = "215122257404"     # 手外 D455（固定相机）
@@ -131,6 +140,7 @@ def main():
     cv2.namedWindow(win_hi, cv2.WINDOW_NORMAL)
 
     state = {"ho_base": None, "hi_base": None}
+    last_log_time = 0.0
 
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
@@ -149,13 +159,17 @@ def main():
             cv2.rectangle(ho_disp, D455_ROI[:2], D455_ROI[2:], (255, 180, 0), 1)
             state["ho_base"] = None
             ho_coord = None
+            ho_gate = gate_detection(res_ho, ho_status, "D455")
             if res_ho is not None and ho_status == "STABLE":
                 pt = hand_out_result_to_base(ho, res_ho)
                 if pt is not None:
                     x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
                     state["ho_base"] = (x, y, z)
-                    ho_coord = "base [%.3f, %.3f, %.3f]" % (x, y, z)
-            draw_header(ho_disp, "D455 GLOBAL", ho_status, ho_coord)
+                    ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
+                    ho_coord = "%s  base [%.3f, %.3f, %.3f]" % (
+                        "PASS" if ho_gate["passed"] else "REJECT", x, y, z)
+            draw_header(ho_disp, "D455 GLOBAL", ho_status, ho_coord,
+                        gate_reason_text(ho_gate))
             cv2.imshow(win_ho, ho_disp)
 
             # ---- 手内 D435I：精定位预览 ----
@@ -164,23 +178,44 @@ def main():
             state["hi_base"] = None
             hi_status = "SEARCHING"
             hi_coord = None
+            res_hi = None
+            hi_camera = None
+            hi_gate = gate_detection(None, hi_status, "D435I")
             if hi_color is not None:
                 raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
                 res_hi, hi_status = hi_filter.update(raw_hi)
                 hi_disp = detector.draw(hi_color, res_hi)
+                hi_gate = gate_detection(res_hi, hi_status, "D435I")
                 if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
                     if ENABLE_ROBOT_GRASP:
                         base_mm, base_m = robot.pixel_to_base(*res_hi["center"], res_hi["z_mm"])
                         x, y, z = float(base_m[0]), float(base_m[1]), float(base_m[2]) + HI_Z_OFFSET
                         state["hi_base"] = (x, y, z)
+                        hi_gate = gate_detection(res_hi, hi_status, "D435I", state["hi_base"])
                         coord_name = "HI base"
                     else:
                         camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                         x, y, z = (camera_mm / 1000.0).tolist()
+                        hi_camera = (x, y, z)
                         coord_name = "HI camera"
-                    hi_coord = "%s [%.3f, %.3f, %.3f]" % (coord_name, x, y, z)
-            draw_header(hi_disp, "D435I WRIST", hi_status, hi_coord)
+                    hi_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
+                        "PASS" if hi_gate["passed"] else "REJECT", coord_name, x, y, z)
+            draw_header(hi_disp, "D435I WRIST", hi_status, hi_coord,
+                        gate_reason_text(hi_gate))
             cv2.imshow(win_hi, hi_disp)
+
+            both_ready = bool(ho_gate["passed"] and hi_gate["passed"])
+            now = time.monotonic()
+            if both_ready and now - last_log_time >= MEASUREMENT_LOG_INTERVAL_S:
+                append_validation_measurement(
+                    ho_result=res_ho,
+                    ho_base=state["ho_base"],
+                    hi_result=res_hi,
+                    hi_camera=hi_camera,
+                    # Passing both per-camera gates does not prove object identity.
+                    cross_camera_verified=False,
+                )
+                last_log_time = now
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), 27):
@@ -216,20 +251,97 @@ def main():
         print("退出。")
 
 
-def draw_header(image, camera_name, status, coordinate=None):
+def draw_header(image, camera_name, status, coordinate=None, gate_reason=None):
     """Draw non-overlapping camera, tracking status and coordinate lines."""
     colors = {
         "SEARCHING": (0, 0, 255),
         "TRACKING": (0, 200, 255),
         "STABLE": (0, 255, 0),
     }
-    cv2.rectangle(image, (0, 0), (image.shape[1], 72), (20, 20, 20), -1)
+    cv2.rectangle(image, (0, 0), (image.shape[1], 92), (20, 20, 20), -1)
     cv2.putText(image, "%s  %s" % (camera_name, status), (10, 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.68, colors.get(status, (255, 255, 255)),
                 2, cv2.LINE_AA)
     detail = coordinate or "coordinate unavailable until STABLE"
     cv2.putText(image, detail, (10, 56), cv2.FONT_HERSHEY_SIMPLEX,
                 0.56, (230, 230, 230), 1, cv2.LINE_AA)
+    if gate_reason:
+        cv2.putText(image, gate_reason, (10, 80), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.46, (180, 180, 180), 1, cv2.LINE_AA)
+
+
+def gate_detection(result, tracking_status, camera_name, base_xyz=None):
+    """Check whether a stable visual result is trustworthy enough to record."""
+    reasons = []
+    if tracking_status != "STABLE" or result is None:
+        reasons.append("not stable")
+        return {"passed": False, "reasons": reasons}
+
+    min_score = D455_MIN_SCORE if camera_name == "D455" else D435I_MIN_SCORE
+    if float(result.get("score", 0.0)) < min_score:
+        reasons.append("score < %.2f" % min_score)
+    x1, y1, x2, y2 = result.get("box", (0, 0, 0, 0))
+    if min(x2 - x1, y2 - y1) < MIN_BOX_SIDE_PX:
+        reasons.append("box too small")
+    if int(result.get("valid_depth_points", 0)) < MIN_VALID_DEPTH_POINTS:
+        reasons.append("too few depth points")
+    if result.get("z_mm") is None:
+        reasons.append("invalid depth")
+
+    if base_xyz is not None:
+        for axis, value, limits in zip("XYZ", base_xyz, WORKSPACE_LIMITS):
+            if not (float(limits[0]) <= float(value) <= float(limits[1])):
+                reasons.append("%s outside validation workspace" % axis)
+    return {"passed": not reasons, "reasons": reasons}
+
+
+def gate_reason_text(gate):
+    if gate["passed"]:
+        return "validation gate: PASS (recording measurement)"
+    return "validation gate: " + ", ".join(gate["reasons"])
+
+
+def _serializable_result(result):
+    if result is None:
+        return None
+    return {
+        "prompt": result.get("prompt"),
+        "score": float(result.get("score", 0.0)),
+        "sam_score": float(result.get("sam_score", 0.0)),
+        "center_px": [int(v) for v in result.get("center", (0, 0))],
+        "box_px": [int(v) for v in result.get("box", (0, 0, 0, 0))],
+        "depth_m": float(result["z_mm"]) / 1000.0,
+        "angle_deg": float(result.get("angle_deg", 0.0)),
+        "valid_depth_points": int(result.get("valid_depth_points", 0)),
+        "center_spread_px": float(result.get("center_spread_px", 0.0)),
+        "depth_spread_mm": float(result.get("depth_spread_mm", 0.0)),
+    }
+
+
+def append_validation_measurement(ho_result, ho_base, hi_result, hi_camera,
+                                  cross_camera_verified=False):
+    """Append one compact record; JSONL survives interruption and is easy to compare."""
+    VALIDATION_LOG.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "prompt": TEXT_PROMPT,
+        "vision_gate_passed": True,
+        "cross_camera_same_target_verified": bool(cross_camera_verified),
+        "robot_motion_authorized": False,
+        "d455": {
+            "serial": HO_SERIAL,
+            "result": _serializable_result(ho_result),
+            "base_xyz_m": [float(v) for v in ho_base] if ho_base is not None else None,
+        },
+        "d435i": {
+            "serial": HI_SERIAL,
+            "result": _serializable_result(hi_result),
+            "camera_xyz_m": [float(v) for v in hi_camera] if hi_camera is not None else None,
+            "base_xyz_m": None,
+        },
+    }
+    with VALIDATION_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def check_calib(robot, ho_cam):
