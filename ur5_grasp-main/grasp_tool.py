@@ -253,9 +253,11 @@ def main():
                 if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
                     camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                     hi_camera = tuple((camera_mm / 1000.0).tolist())
-                    if ENABLE_ROBOT_GRASP or robot_state.available:
+                    # Full grasp and safe-observation mode both own the robot
+                    # control connection, so either mode can read the live TCP.
+                    if robot_control_enabled or robot_state.available:
                         try:
-                            tcp_source = robot if ENABLE_ROBOT_GRASP else robot_state
+                            tcp_source = robot if robot_control_enabled else robot_state
                             tcp_pose = _read_valid_tcp_pose(tcp_source)
                             _, base_m = robot.camera_to_base(camera_mm, tcp_pose=tcp_pose)
                             x, y, z = [float(value) for value in base_m]
