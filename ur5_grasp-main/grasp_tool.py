@@ -200,6 +200,8 @@ def main():
     d455_detection_frozen = False
     observation_active = False
     descent_ready_streak = 0
+    locked_grasp_preview = None
+    safe_descent_completed = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -318,8 +320,22 @@ def main():
                 descent_ready_streak = 0
             if observation_active:
                 association_text = grasp_preview_status_text(
-                    grasp_preview, ENABLE_SAFE_DESCENT_TEST, descent_ready_streak)
-                draw_grasp_preview(hi_disp, res_hi, grasp_preview)
+                    grasp_preview, ENABLE_SAFE_DESCENT_TEST, descent_ready_streak,
+                    safe_descent_completed)
+                locked_pixel = None
+                if locked_grasp_preview is not None:
+                    display_tcp = tcp_pose
+                    if display_tcp is None:
+                        try:
+                            display_tcp = _read_valid_tcp_pose(robot)
+                        except Exception:
+                            display_tcp = None
+                    if display_tcp is not None:
+                        locked_pixel = project_base_point_to_hi_pixel(
+                            robot, locked_grasp_preview["target_surface_xyz_m"],
+                            display_tcp, hi_disp.shape[:2])
+                draw_grasp_preview(hi_disp, res_hi, grasp_preview,
+                                   locked_pixel=locked_pixel)
             else:
                 association_text = association_status_text(
                     association, ENABLE_SAFE_APPROACH_TEST,
@@ -398,6 +414,8 @@ def main():
             elif key == ord('d'):
                 if not ENABLE_SAFE_DESCENT_TEST:
                     print("[安全锁定] 将 ENABLE_SAFE_DESCENT_TEST 改为 True 后才允许无接触下降测试。")
+                elif safe_descent_completed:
+                    print("[安全锁定] 本次运行已完成一次无接触下降；请重启程序后再测试。")
                 elif not observation_active:
                     print("[安全锁定] 请先完成 P 键安全观察点移动。")
                 elif not grasp_preview.get("ready"):
@@ -406,7 +424,10 @@ def main():
                     print("[安全锁定] D435i 稳定帧不足：%d/%d。" %
                           (descent_ready_streak, SAFE_DESCENT_CONFIRM_FRAMES))
                 else:
-                    move_to_safe_descent_test(robot, grasp_preview)
+                    if move_to_safe_descent_test(robot, grasp_preview):
+                        locked_grasp_preview = dict(grasp_preview)
+                        safe_descent_completed = True
+                        print("[无接触下降] 已锁定D键触发时的目标中心；后续画面不再跟随分割中心漂移。")
             elif key == ord('g'):
                 if ENABLE_ROBOT_GRASP:
                     do_grasp(robot, detector, state)
@@ -569,11 +590,14 @@ def build_grasp_preview(hi_base, hi_gate, observation_active):
     return preview
 
 
-def grasp_preview_status_text(preview, safe_descent_enabled=False, ready_streak=0):
+def grasp_preview_status_text(preview, safe_descent_enabled=False, ready_streak=0,
+                              safe_descent_completed=False):
     if not preview.get("ready"):
         return "GRASP PREVIEW: " + preview.get("reason", "waiting")
     endpoint = preview["endpoint_xyz_m"]
     if safe_descent_enabled:
+        if safe_descent_completed:
+            return "SAFE DESCENT COMPLETE: locked center, no further motion"
         if ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES:
             return "SAFE DESCENT READY %d/%d: press D, stop %.0fmm above tool" % (
                 ready_streak, SAFE_DESCENT_CONFIRM_FRAMES,
@@ -584,16 +608,45 @@ def grasp_preview_status_text(preview, safe_descent_enabled=False, ready_streak=
         endpoint[0], endpoint[1], endpoint[2], preview["descent_m"] * 1000.0)
 
 
-def draw_grasp_preview(image, result, preview):
-    """Overlay the virtual grasp center in cyan without changing the detector result."""
-    if not preview.get("ready") or result is None:
+def project_base_point_to_hi_pixel(robot, base_xyz_m, tcp_pose, image_shape):
+    """Project a locked base-frame point into the current D435i image.
+
+    This is the inverse of camera_to_base and uses the current TCP, so the
+    marker stays attached to the same physical base-frame point as the wrist
+    camera moves.
+    """
+    try:
+        target_base_mm = np.asarray(base_xyz_m, dtype=np.float64).reshape(3) * 1000.0
+        target_h = np.append(target_base_mm, 1.0)
+        t_end_to_base = robot.pose_vector_to_matrix(tcp_pose)
+        t_cam_to_base = t_end_to_base @ robot.T_cam2end
+        point_camera = np.linalg.inv(t_cam_to_base) @ target_h
+        if point_camera[2] <= 1.0:
+            return None
+        k = np.asarray(robot.cam_intrinsics, dtype=np.float64)
+        u = int(round(k[0, 0] * point_camera[0] / point_camera[2] + k[0, 2]))
+        v = int(round(k[1, 1] * point_camera[1] / point_camera[2] + k[1, 2]))
+        height, width = image_shape
+        return (u, v) if 0 <= u < width and 0 <= v < height else None
+    except Exception:
+        return None
+
+
+def draw_grasp_preview(image, result, preview, locked_pixel=None):
+    """Overlay the virtual center; use a reprojected locked point after D."""
+    if locked_pixel is not None:
+        u, v = locked_pixel
+        label = "locked grasp center"
+    elif preview.get("ready") and result is not None:
+        u, v = [int(value) for value in result["center"]]
+        label = "preview grasp center"
+    else:
         return
-    u, v = [int(value) for value in result["center"]]
     color = (255, 255, 0)
     cv2.circle(image, (u, v), 14, color, 2)
     cv2.line(image, (u - 20, v), (u + 20, v), color, 1)
     cv2.line(image, (u, v - 20), (u, v + 20), color, 1)
-    cv2.putText(image, "preview grasp center", (u + 18, v + 28),
+    cv2.putText(image, label, (u + 18, v + 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
 
