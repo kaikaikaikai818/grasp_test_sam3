@@ -42,6 +42,9 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 TEXT_PROMPT = "a wrench"       # 修改这里选择要寻找的工具
 ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
 ENABLE_ROBOT_STATE_READ = True  # 只读TCP位姿；不会创建机械臂控制接口
+# 安全观察点测试：仅按 P 后移动到目标上方；不初始化夹爪、不下降、不抓取。
+# 它与 ENABLE_ROBOT_GRASP 互斥，默认关闭。
+ENABLE_SAFE_APPROACH_TEST = False
 # D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
 D455_ROI = (130, 80, 530, 420)
 STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
@@ -53,6 +56,12 @@ MIN_VALID_DEPTH_POINTS = 80
 MEASUREMENT_LOG_INTERVAL_S = 2.0
 TARGET_ASSOCIATION_MAX_DISTANCE_M = 0.10
 APPROACH_HEIGHT_M = 0.15
+# P 键运动的独立安全门槛：必须连续三帧双相机一致到 15mm 内。
+SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M = 0.015
+SAFE_APPROACH_CONFIRM_FRAMES = 3
+SAFE_TRAVEL_Z_M = 0.30
+SAFE_APPROACH_SPEED = 0.03
+SAFE_APPROACH_ACCELERATION = 0.03
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -107,13 +116,16 @@ GRASP_HOME = [-0.4, -0.025, 0.14981] + TOOL_ORIENTATION
 
 def main():
     args = parse_args()
+    if ENABLE_ROBOT_GRASP and ENABLE_SAFE_APPROACH_TEST:
+        raise RuntimeError("ENABLE_ROBOT_GRASP 与 ENABLE_SAFE_APPROACH_TEST 不能同时开启")
+    robot_control_enabled = ENABLE_ROBOT_GRASP or ENABLE_SAFE_APPROACH_TEST
 
     # 1. 机器人（手内相机 + 夹爪）
     robot = UR_Robot(
         robot_ip=ROBOT_IP,
-        is_use_robot=ENABLE_ROBOT_GRASP,
+        is_use_robot=robot_control_enabled,
         is_use_camera=True,
-        connect_robot=ENABLE_ROBOT_GRASP,
+        connect_robot=robot_control_enabled,
         cam2end_path=CAM2END_PATH,
         cam_ini_path=CAM_INI,
         camera_serial=HI_SERIAL,
@@ -121,9 +133,11 @@ def main():
         gripper_port=GRIP_PORT,
     )
     robot_state = ReadOnlyRobotState(
-        ROBOT_IP, enabled=ENABLE_ROBOT_STATE_READ and not ENABLE_ROBOT_GRASP)
+        ROBOT_IP, enabled=ENABLE_ROBOT_STATE_READ and not robot_control_enabled)
     if ENABLE_ROBOT_GRASP:
         print("[OK] 机械臂和夹爪已连接:", ROBOT_IP)
+    elif ENABLE_SAFE_APPROACH_TEST:
+        print("[观察点模式] 机械臂控制已连接；仅允许 P 键移动到安全观察点，夹爪未初始化。")
     else:
         print("[安全模式] 仅运行视觉定位，未连接机械臂控制和夹爪。")
         if robot_state.available:
@@ -169,6 +183,8 @@ def main():
 
     state = {"ho_base": None, "ho_base_aligned": None,
              "hi_base": None, "association": None}
+    approach_ready_streak = 0
+    approach_destination = None
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -178,6 +194,12 @@ def main():
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
     print("  当前目标: %s（双视场文字识别）。" % TEXT_PROMPT)
+    if ENABLE_SAFE_APPROACH_TEST:
+        print("  P -> 仅到安全观察点：先升至 %.0fmm，再摆正并水平移动到目标上方；不会下降或控制夹爪"
+              % (SAFE_TRAVEL_Z_M * 1000.0))
+        print("      仅当双相机连续 %d 帧一致且误差≤%.0fmm 时允许执行。"
+              % (SAFE_APPROACH_CONFIRM_FRAMES,
+                 SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0))
     print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
@@ -254,7 +276,14 @@ def main():
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
                 alignment_applied=camera_alignment is not None)
             state["association"] = association
-            association_text = association_status_text(association)
+            approach_destination, approach_reason = safe_approach_candidate(association)
+            if ENABLE_SAFE_APPROACH_TEST and approach_destination is not None:
+                approach_ready_streak += 1
+            else:
+                approach_ready_streak = 0
+            association_text = association_status_text(
+                association, ENABLE_SAFE_APPROACH_TEST,
+                approach_ready_streak, approach_reason)
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
                         hi_status, hi_coord, gate_reason_text(hi_gate), association_text)
             draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
@@ -311,6 +340,16 @@ def main():
                     normalize_tool_pose(robot)
                 else:
                     print("[安全锁定] 纯视觉模式不发送机械臂运动命令。")
+            elif key == ord('p'):
+                if not ENABLE_SAFE_APPROACH_TEST:
+                    print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
+                elif approach_destination is None:
+                    print("[安全锁定] 双相机尚未通过安全观察点门槛：%s" % approach_reason)
+                elif approach_ready_streak < SAFE_APPROACH_CONFIRM_FRAMES:
+                    print("[安全锁定] 双相机一致帧不足：%d/%d。继续保持目标静止。" %
+                          (approach_ready_streak, SAFE_APPROACH_CONFIRM_FRAMES))
+                else:
+                    move_to_safe_observation(robot, approach_destination)
             elif key == ord('g'):
                 if ENABLE_ROBOT_GRASP:
                     do_grasp(robot, detector, state)
@@ -344,7 +383,8 @@ def draw_header(image, camera_name, status, coordinate=None, gate_reason=None,
         cv2.putText(image, gate_reason, (10, 80), cv2.FONT_HERSHEY_SIMPLEX,
                     0.46, (180, 180, 180), 1, cv2.LINE_AA)
     if association_text:
-        color = (0, 255, 0) if association_text.startswith("SAME TARGET") else (0, 200, 255)
+        color = ((0, 255, 0) if association_text.startswith(("SAME TARGET", "APPROACH READY"))
+                 else (0, 200, 255))
         cv2.putText(image, association_text, (10, 103), cv2.FONT_HERSHEY_SIMPLEX,
                     0.46, color, 1, cv2.LINE_AA)
 
@@ -384,14 +424,57 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
     return result
 
 
-def association_status_text(association):
+def association_status_text(association, safe_approach_mode=False,
+                            ready_streak=0, approach_reason=None):
     if not association["available"]:
         return "ASSOCIATION WAITING: " + association.get("reason", "unavailable")
     distance_mm = association["distance_m"] * 1000.0
     source = "aligned" if association.get("alignment_applied") else "raw"
+    if safe_approach_mode:
+        if approach_reason is None and ready_streak >= SAFE_APPROACH_CONFIRM_FRAMES:
+            return "APPROACH READY %d/%d  delta=%.1fmm  press P" % (
+                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm)
+        if approach_reason is None:
+            return "APPROACH CHECK %d/%d  delta=%.1fmm" % (
+                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm)
+        return "APPROACH LOCKED: " + approach_reason
     if association["matched"]:
         return "SAME TARGET  %s delta=%.1fmm  preview only" % (source, distance_mm)
     return "TARGET MISMATCH  %s delta=%.1fmm" % (source, distance_mm)
+
+
+def point_in_workspace(point):
+    """Return whether an XYZ base-frame point is strictly inside the configured workspace."""
+    return all(float(low) <= float(value) <= float(high)
+               for value, (low, high) in zip(point, WORKSPACE_LIMITS))
+
+
+def safe_approach_candidate(association):
+    """Build a no-descent observation pose only after strict dual-camera agreement.
+
+    The regular association threshold remains intentionally looser for visual
+    diagnostics. Motion uses this separate 15 mm threshold and requires the
+    saved D455/D435 alignment, so a raw D455 coordinate can never authorize P.
+    """
+    if not association or not association.get("available"):
+        return None, "waiting for both cameras"
+    if not association.get("alignment_applied"):
+        return None, "camera alignment file not loaded"
+    if not association.get("matched"):
+        return None, "two cameras do not identify one target"
+    distance = association.get("distance_m")
+    if distance is None or float(distance) > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M:
+        return None, "camera delta exceeds %.0fmm" % (
+            SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0)
+    target = association.get("target_base_xyz_m")
+    if target is None or not point_in_workspace(target):
+        return None, "target outside workspace"
+
+    destination = np.asarray(target, dtype=np.float64).copy()
+    destination[2] = max(float(target[2]) + APPROACH_HEIGHT_M, SAFE_TRAVEL_Z_M)
+    if not point_in_workspace(destination):
+        return None, "safe observation point outside workspace"
+    return destination.tolist(), None
 
 
 def gate_detection(result, tracking_status, camera_name, base_xyz=None):
@@ -594,6 +677,62 @@ def normalize_tool_pose(robot):
                 robot.rtde_c.stopL(1.0)
         except Exception as stop_exc:
             print("[提示] 停止直线运动命令执行失败，请使用示教器或急停检查：%s" % stop_exc)
+        return False
+
+
+def move_to_safe_observation(robot, destination_xyz):
+    """Move only to a high observation point; this function never descends or uses the gripper."""
+    destination = np.asarray(destination_xyz, dtype=np.float64).reshape(3)
+    if not point_in_workspace(destination):
+        print("[安全中止] 安全观察点超出工作空间：%s" %
+              ["%.4f" % value for value in destination])
+        return False
+    if destination[2] < SAFE_TRAVEL_Z_M - 1e-6:
+        print("[安全中止] 观察点低于安全通行高度，拒绝执行。")
+        return False
+
+    try:
+        current = _read_valid_tcp_pose(robot)
+        print("[观察点] 当前TCP=%s" % ["%.4f" % value for value in current])
+
+        # First raise vertically, keeping the current XY and orientation.  This
+        # prevents a horizontal sweep near the table or the target.
+        lift_target = current.copy()
+        lift_target[2] = max(float(current[2]), SAFE_TRAVEL_Z_M)
+        if lift_target[2] > current[2] + 0.001:
+            print("[观察点] 垂直抬升至 z=%.3fm" % lift_target[2])
+            robot.moveL(lift_target.tolist(), speed=SAFE_APPROACH_SPEED,
+                        acceleration=SAFE_APPROACH_ACCELERATION)
+        else:
+            print("[观察点] 当前TCP已高于安全通行高度，不执行下降。")
+
+        # Rotate only at the safe height, then move horizontally at or above it.
+        after_lift = _read_valid_tcp_pose(robot)
+        straighten_target = after_lift.copy()
+        straighten_target[2] = max(float(after_lift[2]), SAFE_TRAVEL_Z_M)
+        straighten_target[3:6] = TOOL_ORIENTATION
+        print("[观察点] 安全高度摆正末端")
+        robot.moveL(straighten_target.tolist(), speed=SAFE_APPROACH_SPEED,
+                    acceleration=SAFE_APPROACH_ACCELERATION)
+        if not verify_tool_orientation(robot, "观察点摆正后"):
+            return False
+
+        observation_pose = destination.tolist() + TOOL_ORIENTATION
+        print("[观察点] 水平移动到目标上方=%s" %
+              ["%.4f" % value for value in observation_pose])
+        robot.moveL(observation_pose, speed=SAFE_APPROACH_SPEED,
+                    acceleration=SAFE_APPROACH_ACCELERATION)
+        if not verify_tool_orientation(robot, "观察点到达后"):
+            return False
+        print("[观察点完成] 已停在目标上方；未下降、未发送夹爪命令、未执行抓取。")
+        return True
+    except Exception as exc:
+        print("[安全中止] 安全观察点移动失败：%s" % exc)
+        try:
+            if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
+                robot.rtde_c.stopL(1.0)
+        except Exception as stop_exc:
+            print("[提示] 无法发送停止命令，请用示教器检查：%s" % stop_exc)
         return False
 
 
