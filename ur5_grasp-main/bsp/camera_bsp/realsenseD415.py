@@ -83,6 +83,12 @@ class Camera(object):
         # cv2.imwrite('color_image.png', color_image)
         cv2.waitKey(5000)
 
+    def stop(self):
+        """Release the RealSense device so another program can open it."""
+        if self.pipeline is not None:
+            self.pipeline.stop()
+            self.pipeline = None
+
     def get_intrinsics(self,rgb_profile):
         raw_intrinsics = rgb_profile.as_video_stream_profile().get_intrinsics()
         #print("camera intrinsics:", raw_intrinsics)

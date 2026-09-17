@@ -15,3 +15,14 @@ ENABLE_ROBOT_GRASP = False
 
 - 原红色圆柱入口：`grasp_cylinder.py`
 - 文字工具入口：`grasp_tool.py`
+
+## 双相机稳定定位
+
+`grasp_tool.py` 中的 `D455_ROI = (130, 80, 530, 420)` 是 D455 工作台裁剪范围，
+格式为 `(左, 上, 右, 下)`。D455 会放大该区域识别远处小工具。画面状态含义：
+
+- `SEARCHING`：没有连续有效目标；
+- `TRACKING`：已经发现目标，但中心或深度仍不稳定；
+- `STABLE`：连续多帧稳定，才会发布坐标。
+
+纯视觉测试继续保持 `ENABLE_ROBOT_GRASP = False`。退出时程序会主动释放两台相机。

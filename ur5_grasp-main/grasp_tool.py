@@ -17,20 +17,29 @@
   --gripper-test 交互式校定夹爪开/合 position
 """
 import argparse
+import os
 import time
+import warnings
 from pathlib import Path
+
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+warnings.filterwarnings("ignore")
 import cv2
 import numpy as np
 
 from bsp.robot_bsp.UR_Robot import UR_Robot, load_camera_ini
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
-from bsp.camera_bsp.sam_tool_detect import SamToolDetector
+from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
 TEXT_PROMPT = "a wrench"       # 修改这里选择要寻找的工具
 ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
+# D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
+D455_ROI = (130, 80, 530, 420)
+STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
 ROBOT_IP = "192.168.1.35"
 HI_SERIAL = "215222074676"     # 手内 D435I（机器人内置相机）
 HO_SERIAL = "215122257404"     # 手外 D455（固定相机）
@@ -85,6 +94,7 @@ def main():
         connect_robot=ENABLE_ROBOT_GRASP,
         cam2end_path=CAM2END_PATH,
         cam_ini_path=CAM_INI,
+        camera_serial=HI_SERIAL,
         is_use_gripper=ENABLE_ROBOT_GRASP,
         gripper_port=GRIP_PORT,
     )
@@ -100,7 +110,7 @@ def main():
     depth_scale = float(np.loadtxt(DEPTH_SCALE_FILE))
 
     # 3. 自检（可选）：比对实时内参与标定内参
-    if args.check_calib:
+    if args.check_calib or ENABLE_ROBOT_GRASP:
         check_calib(robot, ho_cam)
 
     class ParamHolder:
@@ -112,6 +122,8 @@ def main():
     print("[OK] 手外标定加载完成 (camera_pose.txt, cam->base, 米)")
 
     detector = SamToolDetector(TEXT_PROMPT)
+    ho_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
+    hi_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
 
     win_ho = "HO(D455)_eye_out"
     win_hi = "HI(D435I)_eye_in"
@@ -131,29 +143,32 @@ def main():
         while True:
             # ---- 手外 D455：粗定位 ----
             ho_color, ho_depth = ho_cam.get_data()
-            res_ho = detector.detect(ho_color, ho_depth, ho_cam.scale)
+            raw_ho = detector.detect_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
+            res_ho, ho_status = ho_filter.update(raw_ho)
             ho_disp = detector.draw(ho_color, res_ho)
+            cv2.rectangle(ho_disp, D455_ROI[:2], D455_ROI[2:], (255, 180, 0), 1)
             state["ho_base"] = None
-            if res_ho is not None:
+            ho_coord = None
+            if res_ho is not None and ho_status == "STABLE":
                 pt = hand_out_result_to_base(ho, res_ho)
                 if pt is not None:
                     x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
                     state["ho_base"] = (x, y, z)
-                    cv2.circle(ho_disp, res_ho["center"], 6, (0, 0, 255), 2)
-                    cv2.putText(ho_disp, "HO base [%.3f, %.3f, %.3f]" % (x, y, z),
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(ho_disp, "HO (D455) eye-out", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    ho_coord = "base [%.3f, %.3f, %.3f]" % (x, y, z)
+            draw_header(ho_disp, "D455 GLOBAL", ho_status, ho_coord)
             cv2.imshow(win_ho, ho_disp)
 
             # ---- 手内 D435I：精定位预览 ----
             hi_color, hi_depth = robot.get_camera_data()
             hi_disp = hi_color.copy() if hi_color is not None else np.zeros((480, 640, 3), np.uint8)
             state["hi_base"] = None
+            hi_status = "SEARCHING"
+            hi_coord = None
             if hi_color is not None:
-                res_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
+                raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
+                res_hi, hi_status = hi_filter.update(raw_hi)
                 hi_disp = detector.draw(hi_color, res_hi)
-                if res_hi is not None and res_hi["z_mm"] is not None:
+                if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
                     if ENABLE_ROBOT_GRASP:
                         base_mm, base_m = robot.pixel_to_base(*res_hi["center"], res_hi["z_mm"])
                         x, y, z = float(base_m[0]), float(base_m[1]), float(base_m[2]) + HI_Z_OFFSET
@@ -163,11 +178,8 @@ def main():
                         camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                         x, y, z = (camera_mm / 1000.0).tolist()
                         coord_name = "HI camera"
-                    cv2.circle(hi_disp, res_hi["center"], 6, (0, 0, 255), 2)
-                    cv2.putText(hi_disp, "%s [%.3f, %.3f, %.3f]" % (coord_name, x, y, z),
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(hi_disp, "HI (D435I) eye-in", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    hi_coord = "%s [%.3f, %.3f, %.3f]" % (coord_name, x, y, z)
+            draw_header(hi_disp, "D435I WRIST", hi_status, hi_coord)
             cv2.imshow(win_hi, hi_disp)
 
             key = cv2.waitKey(1) & 0xFF
@@ -197,8 +209,27 @@ def main():
                 else:
                     print("[安全锁定] 当前仅验证识别与坐标。确认无误后将 ENABLE_ROBOT_GRASP 改为 True。")
     finally:
+        if getattr(robot, "camera", None) is not None:
+            robot.camera.stop()
+        ho_cam.stop()
         cv2.destroyAllWindows()
         print("退出。")
+
+
+def draw_header(image, camera_name, status, coordinate=None):
+    """Draw non-overlapping camera, tracking status and coordinate lines."""
+    colors = {
+        "SEARCHING": (0, 0, 255),
+        "TRACKING": (0, 200, 255),
+        "STABLE": (0, 255, 0),
+    }
+    cv2.rectangle(image, (0, 0), (image.shape[1], 72), (20, 20, 20), -1)
+    cv2.putText(image, "%s  %s" % (camera_name, status), (10, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.68, colors.get(status, (255, 255, 255)),
+                2, cv2.LINE_AA)
+    detail = coordinate or "coordinate unavailable until STABLE"
+    cv2.putText(image, detail, (10, 56), cv2.FONT_HERSHEY_SIMPLEX,
+                0.56, (230, 230, 230), 1, cv2.LINE_AA)
 
 
 def check_calib(robot, ho_cam):

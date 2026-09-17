@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+from collections import deque
 
 import cv2
 import numpy as np
@@ -82,6 +83,27 @@ class SamToolDetector:
         results = self.detect_all(bgr, depth_raw, depth_scale)
         return results[0] if results else None
 
+    def detect_roi(self, bgr, depth_raw, depth_scale, roi):
+        """Detect in an enlarged workspace crop, then restore full-frame coordinates."""
+        height, width = bgr.shape[:2]
+        x1, y1, x2, y2 = [int(value) for value in roi]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("D455_ROI 无效，请检查 (x1, y1, x2, y2)。")
+        result = self.detect(bgr[y1:y2, x1:x2], depth_raw[y1:y2, x1:x2], depth_scale)
+        if result is None:
+            return None
+        restored = dict(result)
+        u, v = result["center"]
+        bx1, by1, bx2, by2 = result["box"]
+        full_mask = np.zeros((height, width), dtype=bool)
+        full_mask[y1:y2, x1:x2] = result["mask"]
+        restored["center"] = (u + x1, v + y1)
+        restored["box"] = (bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)
+        restored["mask"] = full_mask
+        return restored
+
     @staticmethod
     def draw(bgr, result, color=(0, 255, 0)):
         image = bgr.copy()
@@ -101,3 +123,66 @@ class SamToolDetector:
         cv2.putText(image, text, (x1, max(24, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.55, color, 2, cv2.LINE_AA)
         return image
+
+
+class TemporalResultFilter:
+    """Lock one target and publish only robust, multi-frame coordinates."""
+
+    def __init__(self, window=5, stable_frames=3, max_center_jump_px=100,
+                 max_center_spread_px=12, max_depth_spread_mm=30, max_misses=2):
+        self.history = deque(maxlen=int(window))
+        self.stable_frames = int(stable_frames)
+        self.max_center_jump_px = float(max_center_jump_px)
+        self.max_center_spread_px = float(max_center_spread_px)
+        self.max_depth_spread_mm = float(max_depth_spread_mm)
+        self.max_misses = int(max_misses)
+        self.misses = 0
+
+    def update(self, result):
+        if result is None or result.get("z_mm") is None:
+            self.misses += 1
+            if self.misses > self.max_misses:
+                self.history.clear()
+            return None, "SEARCHING" if not self.history else "TRACKING"
+
+        if self.history:
+            previous = np.asarray(self.history[-1]["center"], dtype=np.float32)
+            current = np.asarray(result["center"], dtype=np.float32)
+            if float(np.linalg.norm(current - previous)) > self.max_center_jump_px:
+                self.misses += 1
+                if self.misses > self.max_misses:
+                    self.history.clear()
+                return None, "TRACKING"
+
+        self.misses = 0
+        self.history.append(result)
+        filtered = self._median_result()
+        if len(self.history) < self.stable_frames:
+            return filtered, "TRACKING"
+
+        centers = np.asarray([item["center"] for item in self.history], dtype=np.float32)
+        center_median = np.median(centers, axis=0)
+        center_spread = float(np.max(np.linalg.norm(centers - center_median, axis=1)))
+        depths = np.asarray([item["z_mm"] for item in self.history], dtype=np.float32)
+        depth_spread = float(np.max(np.abs(depths - np.median(depths))))
+        stable = center_spread <= self.max_center_spread_px and depth_spread <= self.max_depth_spread_mm
+        filtered["stable"] = stable
+        filtered["center_spread_px"] = center_spread
+        filtered["depth_spread_mm"] = depth_spread
+        return filtered, "STABLE" if stable else "TRACKING"
+
+    def _median_result(self):
+        latest = dict(self.history[-1])
+        centers = np.asarray([item["center"] for item in self.history], dtype=np.float32)
+        boxes = np.asarray([item["box"] for item in self.history], dtype=np.float32)
+        depths = np.asarray([item["z_mm"] for item in self.history], dtype=np.float32)
+        scores = np.asarray([item["score"] for item in self.history], dtype=np.float32)
+        angles = np.deg2rad(np.asarray([item["angle_deg"] for item in self.history]) * 2.0)
+        angle = np.rad2deg(np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))) / 2.0
+        latest["center"] = tuple(int(value) for value in np.rint(np.median(centers, axis=0)))
+        latest["box"] = tuple(int(value) for value in np.rint(np.median(boxes, axis=0)))
+        latest["z_mm"] = float(np.median(depths))
+        latest["score"] = float(np.median(scores))
+        latest["angle_deg"] = float(angle % 180.0)
+        latest["stable"] = False
+        return latest
