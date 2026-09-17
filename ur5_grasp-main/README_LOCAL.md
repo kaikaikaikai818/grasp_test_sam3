@@ -59,3 +59,21 @@ outputs/validation/measurements_年月日_时分秒.jsonl
 基座坐标和 D435i 相机坐标。当前安全模式无法取得机械臂实时 TCP，因此
 `cross_camera_same_target_verified` 和 `robot_motion_authorized` 都为 `false`。
 视觉门控通过只表示坐标适合拿来测量比较，不代表允许机械臂运动。
+
+## 双相机目标关联预演
+
+`ENABLE_ROBOT_STATE_READ = True` 会建立独立的 RTDE 状态接收连接，只读取当前
+TCP 位姿。程序不会创建 `RTDEControlInterface`，`ENABLE_ROBOT_GRASP = False`
+仍然锁定所有机械臂运动和夹爪操作。
+
+D435i 检出的相机坐标会通过 `cam2end_20260906.txt` 和实时 TCP 转换成基座坐标，
+再与 D455 的基座坐标比较：
+
+- `SAME TARGET`：两者距离不超过 `TARGET_ASSOCIATION_MAX_DISTANCE_M`；
+- `TARGET MISMATCH`：两者距离超过阈值；
+- `ASSOCIATION WAITING`：检测门控未通过，或者只读 TCP 不可用。
+
+关联通过时只计算并记录目标坐标和目标上方 `APPROACH_HEIGHT_M` 的观察点，窗口
+会标记 `preview only`。日志中的 `robot_motion_authorized` 始终为 `false`。
+如果机械臂网络不可达，程序仍会运行两个相机窗口，但 D435i 只显示相机坐标，
+不会进行跨相机关联。

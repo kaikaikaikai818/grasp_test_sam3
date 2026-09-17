@@ -39,6 +39,7 @@ from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 SCRIPT_ROOT = Path(__file__).resolve().parent
 TEXT_PROMPT = "a wrench"       # 修改这里选择要寻找的工具
 ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
+ENABLE_ROBOT_STATE_READ = True  # 只读TCP位姿；不会创建机械臂控制接口
 # D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
 D455_ROI = (130, 80, 530, 420)
 STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
@@ -48,6 +49,8 @@ D435I_MIN_SCORE = 0.45
 MIN_BOX_SIDE_PX = 12
 MIN_VALID_DEPTH_POINTS = 80
 MEASUREMENT_LOG_INTERVAL_S = 2.0
+TARGET_ASSOCIATION_MAX_DISTANCE_M = 0.10
+APPROACH_HEIGHT_M = 0.15
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -113,11 +116,16 @@ def main():
         camera_serial=HI_SERIAL,
         is_use_gripper=ENABLE_ROBOT_GRASP,
         gripper_port=GRIP_PORT,
+        connect_robot_state=ENABLE_ROBOT_STATE_READ,
     )
     if ENABLE_ROBOT_GRASP:
         print("[OK] 机械臂和夹爪已连接:", ROBOT_IP)
     else:
         print("[安全模式] 仅运行视觉定位，未连接机械臂控制和夹爪。")
+        if robot.rtde_r is not None:
+            print("[只读模式] 已连接机械臂状态接口，只读取TCP位姿。")
+        else:
+            print("[只读模式] TCP位姿不可用，D435i将只显示相机坐标。")
 
     # 2. 手外 D455
     ho_cam = Camera(serial=HO_SERIAL)
@@ -146,7 +154,7 @@ def main():
     cv2.namedWindow(win_ho, cv2.WINDOW_NORMAL)
     cv2.namedWindow(win_hi, cv2.WINDOW_NORMAL)
 
-    state = {"ho_base": None, "hi_base": None}
+    state = {"ho_base": None, "hi_base": None, "association": None}
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -183,9 +191,6 @@ def main():
                         "PASS" if ho_gate["passed"] else "REJECT", x, y, z)
             position_text = active_position.upper() if active_position else "PRESS 1-5"
             sample_count = position_counts.get(active_position, 0)
-            draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
-                        ho_status, ho_coord, gate_reason_text(ho_gate))
-            cv2.imshow(win_ho, ho_disp)
 
             # ---- 手内 D435I：精定位预览 ----
             hi_color, hi_depth = robot.get_camera_data()
@@ -195,6 +200,7 @@ def main():
             hi_coord = None
             res_hi = None
             hi_camera = None
+            tcp_pose = None
             hi_gate = gate_detection(None, hi_status, "D435I")
             if hi_color is not None:
                 raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
@@ -202,21 +208,35 @@ def main():
                 hi_disp = detector.draw(hi_color, res_hi)
                 hi_gate = gate_detection(res_hi, hi_status, "D435I")
                 if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
-                    if ENABLE_ROBOT_GRASP:
-                        base_mm, base_m = robot.pixel_to_base(*res_hi["center"], res_hi["z_mm"])
-                        x, y, z = float(base_m[0]), float(base_m[1]), float(base_m[2]) + HI_Z_OFFSET
-                        state["hi_base"] = (x, y, z)
-                        hi_gate = gate_detection(res_hi, hi_status, "D435I", state["hi_base"])
-                        coord_name = "HI base"
+                    camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
+                    hi_camera = tuple((camera_mm / 1000.0).tolist())
+                    if robot.rtde_r is not None:
+                        try:
+                            tcp_pose = _read_valid_tcp_pose(robot)
+                            _, base_m = robot.camera_to_base(camera_mm, tcp_pose=tcp_pose)
+                            x, y, z = [float(value) for value in base_m]
+                            z += HI_Z_OFFSET
+                            state["hi_base"] = (x, y, z)
+                            hi_gate = gate_detection(
+                                res_hi, hi_status, "D435I", state["hi_base"])
+                            coord_name = "HI base"
+                        except Exception:
+                            x, y, z = hi_camera
+                            coord_name = "HI camera"
                     else:
-                        camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
-                        x, y, z = (camera_mm / 1000.0).tolist()
-                        hi_camera = (x, y, z)
+                        x, y, z = hi_camera
                         coord_name = "HI camera"
                     hi_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
                         "PASS" if hi_gate["passed"] else "REJECT", coord_name, x, y, z)
+            association = associate_targets(state["ho_base"], state["hi_base"],
+                                            ho_gate, hi_gate)
+            state["association"] = association
+            association_text = association_status_text(association)
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
-                        hi_status, hi_coord, gate_reason_text(hi_gate))
+                        hi_status, hi_coord, gate_reason_text(hi_gate), association_text)
+            draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
+                        ho_status, ho_coord, gate_reason_text(ho_gate), association_text)
+            cv2.imshow(win_ho, ho_disp)
             cv2.imshow(win_hi, hi_disp)
 
             both_ready = bool(ho_gate["passed"] and hi_gate["passed"])
@@ -231,8 +251,9 @@ def main():
                     ho_base=state["ho_base"],
                     hi_result=res_hi,
                     hi_camera=hi_camera,
-                    # Passing both per-camera gates does not prove object identity.
-                    cross_camera_verified=False,
+                    hi_base=state["hi_base"],
+                    tcp_pose=tcp_pose,
+                    association=association,
                 )
                 last_log_time = now
                 position_counts[active_position] += 1
@@ -274,19 +295,21 @@ def main():
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
+        robot.close()
         ho_cam.stop()
         cv2.destroyAllWindows()
         print("退出。")
 
 
-def draw_header(image, camera_name, status, coordinate=None, gate_reason=None):
+def draw_header(image, camera_name, status, coordinate=None, gate_reason=None,
+                association_text=None):
     """Draw non-overlapping camera, tracking status and coordinate lines."""
     colors = {
         "SEARCHING": (0, 0, 255),
         "TRACKING": (0, 200, 255),
         "STABLE": (0, 255, 0),
     }
-    cv2.rectangle(image, (0, 0), (image.shape[1], 92), (20, 20, 20), -1)
+    cv2.rectangle(image, (0, 0), (image.shape[1], 114), (20, 20, 20), -1)
     cv2.putText(image, "%s  %s" % (camera_name, status), (10, 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.68, colors.get(status, (255, 255, 255)),
                 2, cv2.LINE_AA)
@@ -296,6 +319,53 @@ def draw_header(image, camera_name, status, coordinate=None, gate_reason=None):
     if gate_reason:
         cv2.putText(image, gate_reason, (10, 80), cv2.FONT_HERSHEY_SIMPLEX,
                     0.46, (180, 180, 180), 1, cv2.LINE_AA)
+    if association_text:
+        color = (0, 255, 0) if association_text.startswith("SAME TARGET") else (0, 200, 255)
+        cv2.putText(image, association_text, (10, 103), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.46, color, 1, cv2.LINE_AA)
+
+
+def associate_targets(ho_base, hi_base, ho_gate, hi_gate):
+    """Compare independent base-frame estimates; never authorize robot motion."""
+    result = {
+        "available": False,
+        "matched": False,
+        "distance_m": None,
+        "target_base_xyz_m": None,
+        "approach_base_xyz_m": None,
+        "robot_motion_authorized": False,
+    }
+    if not (ho_gate["passed"] and hi_gate["passed"]):
+        result["reason"] = "waiting for both validation gates"
+        return result
+    if ho_base is None or hi_base is None:
+        result["reason"] = "read-only TCP unavailable"
+        return result
+
+    distance = float(np.linalg.norm(np.asarray(ho_base) - np.asarray(hi_base)))
+    result["available"] = True
+    result["distance_m"] = distance
+    result["matched"] = distance <= TARGET_ASSOCIATION_MAX_DISTANCE_M
+    if not result["matched"]:
+        result["reason"] = "base coordinates disagree"
+        return result
+
+    target = np.asarray(hi_base, dtype=np.float64)
+    approach = target.copy()
+    approach[2] = min(target[2] + APPROACH_HEIGHT_M, WORKSPACE_LIMITS[2][1])
+    result["target_base_xyz_m"] = target.tolist()
+    result["approach_base_xyz_m"] = approach.tolist()
+    result["reason"] = "same prompt and nearby base coordinates"
+    return result
+
+
+def association_status_text(association):
+    if not association["available"]:
+        return "ASSOCIATION WAITING: " + association.get("reason", "unavailable")
+    distance_mm = association["distance_m"] * 1000.0
+    if association["matched"]:
+        return "SAME TARGET  delta=%.1fmm  preview only" % distance_mm
+    return "TARGET MISMATCH  delta=%.1fmm" % distance_mm
 
 
 def gate_detection(result, tracking_status, camera_name, base_xyz=None):
@@ -348,7 +418,7 @@ def _serializable_result(result):
 
 def append_validation_measurement(log_path, session_id, position_label,
                                   ho_result, ho_base, hi_result, hi_camera,
-                                  cross_camera_verified=False):
+                                  hi_base=None, tcp_pose=None, association=None):
     """Append one compact record; JSONL survives interruption and is easy to compare."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -357,8 +427,10 @@ def append_validation_measurement(log_path, session_id, position_label,
         "position_label": position_label,
         "prompt": TEXT_PROMPT,
         "vision_gate_passed": True,
-        "cross_camera_same_target_verified": bool(cross_camera_verified),
+        "cross_camera_same_target_verified": bool(
+            association and association.get("matched")),
         "robot_motion_authorized": False,
+        "association": association,
         "d455": {
             "serial": HO_SERIAL,
             "result": _serializable_result(ho_result),
@@ -368,7 +440,8 @@ def append_validation_measurement(log_path, session_id, position_label,
             "serial": HI_SERIAL,
             "result": _serializable_result(hi_result),
             "camera_xyz_m": [float(v) for v in hi_camera] if hi_camera is not None else None,
-            "base_xyz_m": None,
+            "base_xyz_m": [float(v) for v in hi_base] if hi_base is not None else None,
+            "tcp_pose_m_rad": [float(v) for v in tcp_pose] if tcp_pose is not None else None,
         },
     }
     with log_path.open("a", encoding="utf-8") as handle:
