@@ -66,29 +66,20 @@ class UR_Robot:
                  is_use_camera=True, connect_robot=True, cam2end_path="cam2end_20260906.txt",
                  camera_serial="215222074676", cam_ini_path="camera_20260906.ini",
                  undistort_img=False, is_use_gripper=True, gripper_port="COM10",
-                 gripper_baudrate=115200, gripper_address=1,
-                 connect_robot_state=False):
+                 gripper_baudrate=115200, gripper_address=1):
         if workspace_limits is None:
             #workspace_limits = [[-0.450, -0.200], [-0.65, -0.47], [0.003, 0.45]]
             workspace_limits = [[-1, 1], [-1, 1], [0.003, 0.9]]
         self.workspace_limits = workspace_limits
         self.connect_robot = connect_robot
-        self.connect_robot_state = bool(connect_robot_state or connect_robot)
         self.is_use_robotiq85 = is_use_robot
         self.is_use_camera = is_use_camera
-        self.robot_state_error = None
-        self.rtde_c = None
-        self.rtde_r = None
         if connect_robot:
             self.rtde_c = rtde_control.RTDEControlInterface(robot_ip)
             self.rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
-        elif self.connect_robot_state:
-            # Read-only mode: deliberately do not create RTDEControlInterface.
-            try:
-                self.rtde_r = rtde_receive.RTDEReceiveInterface(robot_ip)
-            except Exception as exc:
-                self.robot_state_error = str(exc)
-                print("[只读状态不可用] 无法读取机械臂TCP，继续运行相机预览：%s" % exc)
+        else:
+            self.rtde_c = None
+            self.rtde_r = None
 
 
         self.joint_acc = 0.2  
@@ -146,8 +137,6 @@ class UR_Robot:
         
 # Define the robot control class
     def moveL(self, target_pose, speed=0.05, acceleration=0.05):
-        if self.rtde_c is None:
-            raise RuntimeError("机械臂控制接口未启用，禁止发送 moveL。")
         self.rtde_c.moveL(target_pose, speed, acceleration)
         actual_tool_positions = self.get_actual_tcp_pose()
         while not all([np.abs(actual_tool_positions[j] - target_pose[j]) < self.tool_pose_tolerance[j] for j in range(3)]):
@@ -156,8 +145,6 @@ class UR_Robot:
         time.sleep(1.5)  
 
     def moveJ(self, target_joint, speed=0.05, acceleration=0.05):
-        if self.rtde_c is None:
-            raise RuntimeError("机械臂控制接口未启用，禁止发送 moveJ。")
         self.rtde_c.moveJ(target_joint, speed, acceleration)
         actual_joint_positions = self.get_actual_joint_position()
         while not all([np.abs(actual_joint_positions[j] - target_joint[j]) < self.joint_tolerance[j] for j in range(len(target_joint))]):
@@ -169,29 +156,13 @@ class UR_Robot:
         self.moveJ(self.home_joint_config)
 
     def get_actual_tcp_pose(self):
-        if self.rtde_r is None:
-            raise RuntimeError("机械臂状态接口未连接。")
         return self.rtde_r.getActualTCPPose()
 
     def get_actual_joint_position(self):
-        if self.rtde_r is None:
-            raise RuntimeError("机械臂状态接口未连接。")
         return self.rtde_r.getActualQ()
 
     def get_robot_status(self):
-        if self.rtde_r is None:
-            raise RuntimeError("机械臂状态接口未连接。")
         return self.rtde_r.getRobotStatus()
-
-    def close(self):
-        """Release receive/control connections without issuing a robot command."""
-        for interface in (self.rtde_r, self.rtde_c):
-            disconnect = getattr(interface, "disconnect", None)
-            if callable(disconnect):
-                try:
-                    disconnect()
-                except Exception:
-                    pass
 
     # -------------------------- 夹爪（Modbus RTU） --------------------------
     def init_gripper(self):

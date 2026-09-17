@@ -62,9 +62,10 @@ outputs/validation/measurements_年月日_时分秒.jsonl
 
 ## 双相机目标关联预演
 
-`ENABLE_ROBOT_STATE_READ = True` 会建立独立的 RTDE 状态接收连接，只读取当前
-TCP 位姿。程序不会创建 `RTDEControlInterface`，`ENABLE_ROBOT_GRASP = False`
-仍然锁定所有机械臂运动和夹爪操作。
+`ENABLE_ROBOT_STATE_READ = True` 通过独立的 `read_only_robot_state.py` 建立
+RTDE 状态接收连接，只读取当前 TCP 位姿。厂家提供的 `UR_Robot.py` 保持原样；
+程序不会创建 `RTDEControlInterface`，`ENABLE_ROBOT_GRASP = False` 仍然锁定
+所有机械臂运动和夹爪操作。
 
 D435i 检出的相机坐标会通过 `cam2end_20260906.txt` 和实时 TCP 转换成基座坐标，
 再与 D455 的基座坐标比较：

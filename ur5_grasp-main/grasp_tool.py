@@ -31,6 +31,7 @@ import cv2
 import numpy as np
 
 from bsp.robot_bsp.UR_Robot import UR_Robot, load_camera_ini
+from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
@@ -116,13 +117,14 @@ def main():
         camera_serial=HI_SERIAL,
         is_use_gripper=ENABLE_ROBOT_GRASP,
         gripper_port=GRIP_PORT,
-        connect_robot_state=ENABLE_ROBOT_STATE_READ,
     )
+    robot_state = ReadOnlyRobotState(
+        ROBOT_IP, enabled=ENABLE_ROBOT_STATE_READ and not ENABLE_ROBOT_GRASP)
     if ENABLE_ROBOT_GRASP:
         print("[OK] 机械臂和夹爪已连接:", ROBOT_IP)
     else:
         print("[安全模式] 仅运行视觉定位，未连接机械臂控制和夹爪。")
-        if robot.rtde_r is not None:
+        if robot_state.available:
             print("[只读模式] 已连接机械臂状态接口，只读取TCP位姿。")
         else:
             print("[只读模式] TCP位姿不可用，D435i将只显示相机坐标。")
@@ -210,9 +212,10 @@ def main():
                 if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
                     camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                     hi_camera = tuple((camera_mm / 1000.0).tolist())
-                    if robot.rtde_r is not None:
+                    if ENABLE_ROBOT_GRASP or robot_state.available:
                         try:
-                            tcp_pose = _read_valid_tcp_pose(robot)
+                            tcp_source = robot if ENABLE_ROBOT_GRASP else robot_state
+                            tcp_pose = _read_valid_tcp_pose(tcp_source)
                             _, base_m = robot.camera_to_base(camera_mm, tcp_pose=tcp_pose)
                             x, y, z = [float(value) for value in base_m]
                             z += HI_Z_OFFSET
@@ -295,7 +298,7 @@ def main():
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
-        robot.close()
+        robot_state.close()
         ho_cam.stop()
         cv2.destroyAllWindows()
         print("退出。")
