@@ -138,6 +138,11 @@ class TemporalResultFilter:
         self.max_misses = int(max_misses)
         self.misses = 0
 
+    def reset(self):
+        """Forget the previous target before starting a newly labelled measurement."""
+        self.history.clear()
+        self.misses = 0
+
     def update(self, result):
         if result is None or result.get("z_mm") is None:
             self.misses += 1

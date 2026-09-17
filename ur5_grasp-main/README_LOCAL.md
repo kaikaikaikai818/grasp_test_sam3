@@ -36,13 +36,26 @@ ENABLE_ROBOT_GRASP = False
 - `REJECT`：结果虽然可能稳定，但没有通过验收，第三行会显示原因；
 - `validation gate: PASS`：坐标会进入测量日志。
 
-当 D455 和 D435i 同时通过时，程序每 2 秒追加一条记录到：
+启动后先移动工具到测试位置，再按数字键标记：
+
+- `1`：圆盘中心；
+- `2`：画面左侧；
+- `3`：画面右侧；
+- `4`：画面上方；
+- `5`：画面下方。
+
+按键后程序会清除上一位置的稳定历史，重新等待两台相机达到 `STABLE + PASS`。
+窗口标题中的 `CENTER:3` 表示中心位置已经记录3条。没有按数字键时不会写入
+测量数据。
+
+当 D455 和 D435i 同时通过时，程序每 2 秒追加一条记录到本次运行的独立文件：
 
 ```text
-outputs/validation/measurements.jsonl
+outputs/validation/measurements_年月日_时分秒.jsonl
 ```
 
-每行记录时间、提示词、置信度、像素中心、深度、角度、稳定波动、D455
+每行记录会带有 `session_id` 和 `position_label`，同时保存时间、提示词、
+置信度、像素中心、深度、角度、稳定波动、D455
 基座坐标和 D435i 相机坐标。当前安全模式无法取得机械臂实时 TCP，因此
 `cross_camera_same_target_verified` 和 `robot_motion_authorized` 都为 `false`。
 视觉门控通过只表示坐标适合拿来测量比较，不代表允许机械臂运动。

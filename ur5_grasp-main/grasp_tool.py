@@ -48,7 +48,14 @@ D435I_MIN_SCORE = 0.45
 MIN_BOX_SIDE_PX = 12
 MIN_VALID_DEPTH_POINTS = 80
 MEASUREMENT_LOG_INTERVAL_S = 2.0
-VALIDATION_LOG = SCRIPT_ROOT.parent / "outputs" / "validation" / "measurements.jsonl"
+VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
+POSITION_LABELS = {
+    ord("1"): "center",
+    ord("2"): "left",
+    ord("3"): "right",
+    ord("4"): "top",
+    ord("5"): "bottom",
+}
 ROBOT_IP = "192.168.1.35"
 HI_SERIAL = "215222074676"     # 手内 D435I（机器人内置相机）
 HO_SERIAL = "215122257404"     # 手外 D455（固定相机）
@@ -141,6 +148,10 @@ def main():
 
     state = {"ho_base": None, "hi_base": None}
     last_log_time = 0.0
+    active_position = None
+    position_counts = {label: 0 for label in POSITION_LABELS.values()}
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    validation_log = VALIDATION_DIR / ("measurements_%s.jsonl" % session_id)
 
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
@@ -148,6 +159,8 @@ def main():
     print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
+    print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
+    print("  本次测量文件:", validation_log)
 
     try:
         while True:
@@ -168,8 +181,10 @@ def main():
                     ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
                     ho_coord = "%s  base [%.3f, %.3f, %.3f]" % (
                         "PASS" if ho_gate["passed"] else "REJECT", x, y, z)
-            draw_header(ho_disp, "D455 GLOBAL", ho_status, ho_coord,
-                        gate_reason_text(ho_gate))
+            position_text = active_position.upper() if active_position else "PRESS 1-5"
+            sample_count = position_counts.get(active_position, 0)
+            draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
+                        ho_status, ho_coord, gate_reason_text(ho_gate))
             cv2.imshow(win_ho, ho_disp)
 
             # ---- 手内 D435I：精定位预览 ----
@@ -200,14 +215,18 @@ def main():
                         coord_name = "HI camera"
                     hi_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
                         "PASS" if hi_gate["passed"] else "REJECT", coord_name, x, y, z)
-            draw_header(hi_disp, "D435I WRIST", hi_status, hi_coord,
-                        gate_reason_text(hi_gate))
+            draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
+                        hi_status, hi_coord, gate_reason_text(hi_gate))
             cv2.imshow(win_hi, hi_disp)
 
             both_ready = bool(ho_gate["passed"] and hi_gate["passed"])
             now = time.monotonic()
-            if both_ready and now - last_log_time >= MEASUREMENT_LOG_INTERVAL_S:
+            if (active_position is not None and both_ready
+                    and now - last_log_time >= MEASUREMENT_LOG_INTERVAL_S):
                 append_validation_measurement(
+                    log_path=validation_log,
+                    session_id=session_id,
+                    position_label=active_position,
                     ho_result=res_ho,
                     ho_base=state["ho_base"],
                     hi_result=res_hi,
@@ -216,10 +235,19 @@ def main():
                     cross_camera_verified=False,
                 )
                 last_log_time = now
+                position_counts[active_position] += 1
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), 27):
                 break
+            elif key in POSITION_LABELS:
+                active_position = POSITION_LABELS[key]
+                position_counts[active_position] = 0
+                last_log_time = 0.0
+                ho_filter.reset()
+                hi_filter.reset()
+                print("[位置标记] %s：已清空旧稳定历史，等待两台相机重新 STABLE + PASS。"
+                      % active_position)
             elif key == ord('o'):
                 if ENABLE_ROBOT_GRASP:
                     robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
@@ -318,12 +346,15 @@ def _serializable_result(result):
     }
 
 
-def append_validation_measurement(ho_result, ho_base, hi_result, hi_camera,
+def append_validation_measurement(log_path, session_id, position_label,
+                                  ho_result, ho_base, hi_result, hi_camera,
                                   cross_camera_verified=False):
     """Append one compact record; JSONL survives interruption and is easy to compare."""
-    VALIDATION_LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "session_id": session_id,
+        "position_label": position_label,
         "prompt": TEXT_PROMPT,
         "vision_gate_passed": True,
         "cross_camera_same_target_verified": bool(cross_camera_verified),
@@ -340,7 +371,7 @@ def append_validation_measurement(ho_result, ho_base, hi_result, hi_camera,
             "base_xyz_m": None,
         },
     }
-    with VALIDATION_LOG.open("a", encoding="utf-8") as handle:
+    with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
