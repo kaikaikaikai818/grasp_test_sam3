@@ -62,6 +62,9 @@ SAFE_APPROACH_CONFIRM_FRAMES = 3
 SAFE_TRAVEL_Z_M = 0.25
 SAFE_APPROACH_SPEED = 0.03
 SAFE_APPROACH_ACCELERATION = 0.03
+# 观察点后的抓取预览：只显示计划，不会产生任何运动命令。
+GRASP_PREVIEW_HEIGHT_M = 0.10
+GRASP_PREVIEW_SURFACE_CLEARANCE_M = 0.025
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -186,6 +189,7 @@ def main():
     approach_ready_streak = 0
     approach_destination = None
     d455_detection_frozen = False
+    observation_active = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -293,9 +297,15 @@ def main():
                 approach_ready_streak += 1
             else:
                 approach_ready_streak = 0
-            association_text = association_status_text(
-                association, ENABLE_SAFE_APPROACH_TEST,
-                approach_ready_streak, approach_reason)
+            grasp_preview = build_grasp_preview(
+                state["hi_base"], hi_gate, observation_active)
+            if observation_active:
+                association_text = grasp_preview_status_text(grasp_preview)
+                draw_grasp_preview(hi_disp, res_hi, grasp_preview)
+            else:
+                association_text = association_status_text(
+                    association, ENABLE_SAFE_APPROACH_TEST,
+                    approach_ready_streak, approach_reason)
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
                         hi_status, hi_coord, gate_reason_text(hi_gate), association_text)
             draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
@@ -363,8 +373,10 @@ def main():
                 else:
                     if move_to_safe_observation(robot, approach_destination):
                         d455_detection_frozen = True
+                        observation_active = True
                         ho_filter.reset()
                         print("[观察点] 已暂停D455目标检测，避免移动中的夹爪被识别为工具。")
+                        print("[抓取预览] D435i 将持续显示预抓取点和虚拟下降终点；不会发送运动或夹爪命令。")
             elif key == ord('g'):
                 if ENABLE_ROBOT_GRASP:
                     do_grasp(robot, detector, state)
@@ -490,6 +502,62 @@ def safe_approach_candidate(association):
     if not point_in_workspace(destination):
         return None, "safe observation point outside workspace"
     return destination.tolist(), None
+
+
+def build_grasp_preview(hi_base, hi_gate, observation_active):
+    """Calculate a virtual D435i-only descent plan; it never authorizes motion."""
+    preview = {"active": bool(observation_active), "ready": False}
+    if not observation_active:
+        return preview
+    if not hi_gate["passed"] or hi_base is None:
+        preview["reason"] = "waiting for stable D435i target"
+        return preview
+    target = np.asarray(hi_base, dtype=np.float64)
+    if not point_in_workspace(target):
+        preview["reason"] = "D435i target outside workspace"
+        return preview
+
+    # The endpoint deliberately remains 25 mm above the measured top surface.
+    # It is a visual aid for the future grasp stage, never a contact command.
+    endpoint = target.copy()
+    endpoint[2] += GRASP_PREVIEW_SURFACE_CLEARANCE_M
+    pregrasp = target.copy()
+    pregrasp[2] = min(target[2] + GRASP_PREVIEW_HEIGHT_M, WORKSPACE_LIMITS[2][1])
+    if not point_in_workspace(endpoint) or not point_in_workspace(pregrasp):
+        preview["reason"] = "virtual point outside workspace"
+        return preview
+    if pregrasp[2] <= endpoint[2]:
+        preview["reason"] = "virtual descent has no clearance"
+        return preview
+    preview.update({
+        "ready": True,
+        "target_surface_xyz_m": target.tolist(),
+        "pregrasp_xyz_m": pregrasp.tolist(),
+        "endpoint_xyz_m": endpoint.tolist(),
+        "descent_m": float(pregrasp[2] - endpoint[2]),
+    })
+    return preview
+
+
+def grasp_preview_status_text(preview):
+    if not preview.get("ready"):
+        return "GRASP PREVIEW: " + preview.get("reason", "waiting")
+    endpoint = preview["endpoint_xyz_m"]
+    return "GRASP PREVIEW ONLY: end [%.3f, %.3f, %.3f], descend %.0fmm" % (
+        endpoint[0], endpoint[1], endpoint[2], preview["descent_m"] * 1000.0)
+
+
+def draw_grasp_preview(image, result, preview):
+    """Overlay the virtual grasp center in cyan without changing the detector result."""
+    if not preview.get("ready") or result is None:
+        return
+    u, v = [int(value) for value in result["center"]]
+    color = (255, 255, 0)
+    cv2.circle(image, (u, v), 14, color, 2)
+    cv2.line(image, (u - 20, v), (u + 20, v), color, 1)
+    cv2.line(image, (u, v - 20), (u, v + 20), color, 1)
+    cv2.putText(image, "preview grasp center", (u + 18, v + 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
 
 def gate_detection(result, tracking_status, camera_name, base_xyz=None):
