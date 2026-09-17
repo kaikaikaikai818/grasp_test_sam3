@@ -59,7 +59,7 @@ APPROACH_HEIGHT_M = 0.15
 # P 键运动的独立安全门槛：必须连续三帧双相机一致到 15mm 内。
 SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M = 0.015
 SAFE_APPROACH_CONFIRM_FRAMES = 3
-SAFE_TRAVEL_Z_M = 0.30
+SAFE_TRAVEL_Z_M = 0.25
 SAFE_APPROACH_SPEED = 0.03
 SAFE_APPROACH_ACCELERATION = 0.03
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
@@ -185,6 +185,7 @@ def main():
              "hi_base": None, "association": None}
     approach_ready_streak = 0
     approach_destination = None
+    d455_detection_frozen = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -210,28 +211,37 @@ def main():
         while True:
             # ---- 手外 D455：粗定位 ----
             ho_color, ho_depth = ho_cam.get_data()
-            raw_ho = detector.detect_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
-            res_ho, ho_status = ho_filter.update(raw_ho)
-            ho_disp = detector.draw(ho_color, res_ho)
-            cv2.rectangle(ho_disp, D455_ROI[:2], D455_ROI[2:], (255, 180, 0), 1)
             state["ho_base"] = None
             state["ho_base_aligned"] = None
             ho_coord = None
-            ho_gate = gate_detection(res_ho, ho_status, "D455")
-            if res_ho is not None and ho_status == "STABLE":
-                pt = hand_out_result_to_base(ho, res_ho)
-                if pt is not None:
-                    x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
-                    state["ho_base"] = (x, y, z)
-                    state["ho_base_aligned"] = (
-                        apply_alignment(state["ho_base"], camera_alignment)
-                        if camera_alignment is not None else state["ho_base"])
-                    ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
-                    ax, ay, az = state["ho_base_aligned"]
-                    coord_kind = "aligned" if camera_alignment is not None else "raw"
-                    ho_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
-                        "PASS" if ho_gate["passed"] else "REJECT",
-                        coord_kind, ax, ay, az)
+            if d455_detection_frozen:
+                # Once the arm moves, its gripper may enter D455's view and is
+                # visually similar to a tool.  D455 is no longer used after P.
+                res_ho = None
+                ho_status = "FROZEN"
+                ho_gate = {"passed": False, "reasons": ["paused after P movement"]}
+                ho_coord = "D455 detection paused after P"
+                ho_disp = ho_color.copy()
+            else:
+                raw_ho = detector.detect_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
+                res_ho, ho_status = ho_filter.update(raw_ho)
+                ho_disp = detector.draw(ho_color, res_ho)
+                ho_gate = gate_detection(res_ho, ho_status, "D455")
+                if res_ho is not None and ho_status == "STABLE":
+                    pt = hand_out_result_to_base(ho, res_ho)
+                    if pt is not None:
+                        x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
+                        state["ho_base"] = (x, y, z)
+                        state["ho_base_aligned"] = (
+                            apply_alignment(state["ho_base"], camera_alignment)
+                            if camera_alignment is not None else state["ho_base"])
+                        ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
+                        ax, ay, az = state["ho_base_aligned"]
+                        coord_kind = "aligned" if camera_alignment is not None else "raw"
+                        ho_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
+                            "PASS" if ho_gate["passed"] else "REJECT",
+                            coord_kind, ax, ay, az)
+            cv2.rectangle(ho_disp, D455_ROI[:2], D455_ROI[2:], (255, 180, 0), 1)
             position_text = active_position.upper() if active_position else "PRESS 1-5"
             sample_count = position_counts.get(active_position, 0)
 
@@ -351,7 +361,10 @@ def main():
                     print("[安全锁定] 双相机一致帧不足：%d/%d。继续保持目标静止。" %
                           (approach_ready_streak, SAFE_APPROACH_CONFIRM_FRAMES))
                 else:
-                    move_to_safe_observation(robot, approach_destination)
+                    if move_to_safe_observation(robot, approach_destination):
+                        d455_detection_frozen = True
+                        ho_filter.reset()
+                        print("[观察点] 已暂停D455目标检测，避免移动中的夹爪被识别为工具。")
             elif key == ord('g'):
                 if ENABLE_ROBOT_GRASP:
                     do_grasp(robot, detector, state)
