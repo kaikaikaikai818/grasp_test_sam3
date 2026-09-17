@@ -1,0 +1,2 @@
+weights/mobile_sam.pt filter=lfs diff=lfs merge=lfs -text
+weights/clipseg-rd64-refined/model.safetensors filter=lfs diff=lfs merge=lfs -text
