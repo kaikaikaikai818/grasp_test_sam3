@@ -9,6 +9,7 @@ class Camera(object):
         self.im_width = width
         self.fps = fps
         self.serial = serial
+        self.connected_serial = None
         self.intrinsics = None
         self.scale = None
         self.pipeline = None
@@ -34,10 +35,11 @@ class Camera(object):
         self.intrinsics = self.get_intrinsics(rgb_profile)
         # Determine depth scale
         dev = cfg.get_device()
+        self.connected_serial = dev.get_info(rs.camera_info.serial_number)
         self.scale = dev.first_depth_sensor().get_depth_scale()
         print("Camera connected: %s (serial=%s)" % (
             dev.get_info(rs.camera_info.name),
-            dev.get_info(rs.camera_info.serial_number)))
+            self.connected_serial))
         print("Color intrinsics fx=%.3f fy=%.3f cx=%.3f cy=%.3f  depth_scale=%.6f"
               % (self.intrinsics[0, 0], self.intrinsics[1, 1],
                  self.intrinsics[0, 2], self.intrinsics[1, 2], self.scale))

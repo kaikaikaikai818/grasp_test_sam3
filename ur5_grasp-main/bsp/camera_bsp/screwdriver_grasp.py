@@ -122,7 +122,7 @@ def load_calibration(path: Path) -> Optional[dict]:
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     required = {"support_plane_z_m", "support_plane_spread_m", "contact_offset_m",
-                "minimum_tcp_plane_clearance_m"}
+                "minimum_tcp_plane_clearance_m", "handle_surface_above_plane_m"}
     if not required.issubset(data):
         raise ValueError("grasp calibration missing required fields")
     return data

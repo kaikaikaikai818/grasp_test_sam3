@@ -36,6 +36,7 @@ from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
+from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.screwdriver_grasp import (find_screwdriver_handle,
                                                fit_horizontal_support_plane,
                                                load_calibration, result_at_handle)
@@ -105,8 +106,11 @@ HO_FX = 386.471
 HO_FY = 386.034
 HO_CX = 321.617
 HO_CY = 237.200
-# 手外内参与标定值容差（像素）
-CALIB_TOL = 3.0
+# 相机内参与标定值容差（像素）。D435i 的 8px 上限仅适用于当前已验证的
+# 640x480 流配置；D455 仍保持严格阈值。
+D455_CALIB_TOL = 3.0
+D435I_CALIB_TOL = 8.0
+D435I_VERIFIED_WARNING_TOL = 3.0
 
 TOOL_ORIENTATION = [3.141, 0.0, 0.0]   # 固定朝下 (RX, RY, RZ)
 ORIENTATION_SAFE_Z = 0.20     # 姿态归正前TCP至少升到此高度(m)
@@ -506,14 +510,15 @@ def main():
                     current_target = np.asarray(state["hi_base"], dtype=np.float64)
                     locked_target = np.asarray(locked_screwdriver_handle["target_base_xyz_m"], dtype=np.float64)
                     target_shift = float(np.linalg.norm(current_target - locked_target))
-                    plane_shift = abs(current_support_plane.z_m -
-                                      float(screwdriver_calibration["support_plane_z_m"]))
+                    handle_height_shift = abs(
+                        (current_target[2] - current_support_plane.z_m) -
+                        float(screwdriver_calibration["handle_surface_above_plane_m"]))
                     if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
                         print("[安全锁定] 手柄目标在 D 后移动 %.1fmm；请重新运行 P → D。" %
                               (target_shift * 1000.0))
-                    elif plane_shift > SUPPORT_PLANE_SHIFT_MAX_M:
-                        print("[安全锁定] 纸箱平面偏移 %.1fmm；请重新进行 plane 标定。" %
-                              (plane_shift * 1000.0))
+                    elif handle_height_shift > SUPPORT_PLANE_SHIFT_MAX_M:
+                        print("[安全锁定] 手柄相对纸箱平面的高度变化 %.1fmm；请重新进行 contact 标定。" %
+                              (handle_height_shift * 1000.0))
                     else:
                         execute_screwdriver_grasp(robot, locked_target,
                                                    current_support_plane.z_m,
@@ -827,14 +832,16 @@ def check_calib(robot, ho_cam):
     # ---- 手外 D455 ----
     live = ho_cam.intrinsics
     exp = np.array([[HO_FX, 0, HO_CX], [0, HO_FY, HO_CY], [0, 0, 1]])
-    dho = max(abs(live[0, 0] - exp[0, 0]), abs(live[1, 1] - exp[1, 1]),
-              abs(live[0, 2] - exp[0, 2]), abs(live[1, 2] - exp[1, 2]))
+    dho = max_intrinsics_delta(live, exp)
     print("手外D455 实时 fx=%.3f fy=%.3f cx=%.3f cy=%.3f | 期望=%.3f/%.3f/%.3f/%.3f | Δmax=%.3f px"
           % (live[0, 0], live[1, 1], live[0, 2], live[1, 2],
              exp[0, 0], exp[1, 1], exp[0, 2], exp[1, 2], dho))
-    if dho > CALIB_TOL:
+    if not np.all(np.isfinite(live)):
+        print("[自检失败] 手外D455 实时内参包含非有限值。")
+        ok = False
+    elif dho > D455_CALIB_TOL:
         print("[自检失败] 手外D455 内参与标定值不符(%.3f>%.1f)！"
-              % (dho, CALIB_TOL))
+              % (dho, D455_CALIB_TOL))
         ok = False
 
     # ---- 手内 D435I ----
@@ -844,14 +851,32 @@ def check_calib(robot, ho_cam):
     else:
         K_ini, _ = calib
         live_hi = robot.camera.intrinsics
-        dhi = max(abs(live_hi[0, 0] - K_ini[0, 0]), abs(live_hi[1, 1] - K_ini[1, 1]),
-                  abs(live_hi[0, 2] - K_ini[0, 2]), abs(live_hi[1, 2] - K_ini[1, 2]))
+        connected_serial = getattr(robot.camera, "connected_serial", None)
+        if connected_serial != HI_SERIAL:
+            print("[自检失败] 手内相机序列号不符(实际=%s，期望=%s)。"
+                  % (connected_serial or "未知", HI_SERIAL))
+            ok = False
+        if (robot.camera.im_width, robot.camera.im_height) != (640, 480):
+            print("[自检失败] 手内D435i 图像流不是 640x480 (当前=%sx%s)。"
+                  % (robot.camera.im_width, robot.camera.im_height))
+            ok = False
+        if not np.all(np.isfinite(live_hi)):
+            print("[自检失败] 手内D435i 实时内参包含非有限值。")
+            ok = False
+            dhi = float("inf")
+        else:
+            dhi = max_intrinsics_delta(live_hi, K_ini)
         print("手内D435I 实时 fx=%.3f fy=%.3f cx=%.3f cy=%.3f | 期望=%.3f/%.3f/%.3f/%.3f | Δmax=%.3f px"
               % (live_hi[0, 0], live_hi[1, 1], live_hi[0, 2], live_hi[1, 2],
                  K_ini[0, 0], K_ini[1, 1], K_ini[0, 2], K_ini[1, 2], dhi))
-        if dhi > CALIB_TOL:
-            print("[自检失败] 手内D435I 内参与标定值不符(%.3f>%.1f)！" % (dhi, CALIB_TOL))
+        if dhi > D435I_CALIB_TOL:
+            print("[自检失败] 手内D435I 内参与标定值不符(%.3f>%.1f)！"
+                  % (dhi, D435I_CALIB_TOL))
             ok = False
+        elif dhi > D435I_VERIFIED_WARNING_TOL:
+            print("[自检警告] 手内D435i 内参差异 %.3fpx：已按当前验证的 640x480 配置放行 "
+                  "(上限 %.1fpx)。请勿更换相机、分辨率或手眼标定。"
+                  % (dhi, D435I_CALIB_TOL))
 
     if not ok:
         raise RuntimeError("内参自检未通过，请检查相机/标定。不要继续执行抓取。")

@@ -124,9 +124,6 @@ def main():
                 if "support_plane_z_m" not in data:
                     print("[拒绝保存] 请先运行 plane 标定。")
                     continue
-                if abs(plane.z_m - float(data["support_plane_z_m"])) > MAX_PLANE_SHIFT_M:
-                    print("[拒绝保存] 当前纸箱平面与保存平面相差过大。")
-                    continue
                 target = pixel_to_base(*handle.center_px, handle.depth_m)
                 tcp_clearance = float(tcp[2] - plane.z_m)
                 offset = float(tcp[2] - target[2])
@@ -135,6 +132,7 @@ def main():
                     continue
                 data.update({"contact_offset_m": offset,
                              "minimum_tcp_plane_clearance_m": tcp_clearance - 0.003,
+                             "handle_surface_above_plane_m": float(target[2] - plane.z_m),
                              "contact_calibrated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                              "prompt": args.prompt})
                 save_calibration(CALIBRATION_PATH, data)

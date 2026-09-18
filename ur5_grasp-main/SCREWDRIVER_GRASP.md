@@ -20,6 +20,8 @@ python ur5_grasp-main\calibrate_screwdriver_grasp.py contact
 
 当画面显示 `HANDLE STABLE`，点击画面后按小写 `k` 保存 TCP 接触偏移。配置保存在本机 `grasp_surface_calibration.json`，不会上传 GitHub。
 
+`plane` 和 `contact` 阶段显示的 base 高度可能因腕部相机姿态出现数毫米差异；程序实际比较的是螺丝刀手柄表面相对当前纸箱平面的高度，而不是要求两次绝对 base 高度完全一致。
+
 ## 抓取测试
 
 在 `grasp_tool.py` 中设置：
