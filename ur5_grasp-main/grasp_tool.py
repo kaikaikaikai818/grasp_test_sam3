@@ -36,28 +36,10 @@ from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
-from bsp.camera_bsp.generic_grasp import (select_one, pixel_grasp_candidate,
-                                          base_grasp_plan)
 
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
 TEXT_PROMPT = "a wrench"       # 修改这里选择要寻找的工具
-# 通用工具流程：只改上面的 TEXT_PROMPT，例如 "a screwdriver"。
-# 识别和几何抓取候选会正常显示；下列实测项留空时，P/D/R 的实体动作自动锁定。
-ENABLE_GENERIC_TOOL_FLOW = True
-ENABLE_GENERIC_GRASP = False   # 只有完成实测配置和无接触测试后才改为 True
-SCAN_TCP_POSE = None           # 示教器记录 [x,y,z,rx,ry,rz]；必须能看到工作区且不遮挡 D455
-GRIPPER_YAW_OFFSET_RAD = None  # 夹爪手指方向相对 TCP x 轴的实测偏角
-GRIPPER_LOWEST_POINT_OFFSET_M = None  # TCP 到夹爪最低点的竖直距离（正数）
-GRIPPER_CONTACT_OFFSET_M = None  # TCP 到手指接触面的竖直距离（正数）
-SUPPORT_TOP_Z_M = None         # 支撑件顶面在机器人 base 坐标系的 Z 值
-MIN_SUPPORT_CLEARANCE_M = None  # 夹爪最低点相对支撑件顶面的最小安全间隙
-GRIPPER_MIN_JAW_WIDTH_M = None  # 实测可安全夹持的最小工具宽度
-GRIPPER_MAX_JAW_WIDTH_M = None  # 实测可安全夹持的最大工具宽度
-GENERIC_PREGRASP_HEIGHT_M = 0.10
-GENERIC_TEST_LIFT_M = 0.020
-GENERIC_GRASP_SPEED = 0.01
-GENERIC_GRASP_FORCE = 20
 ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
 ENABLE_ROBOT_STATE_READ = True  # 只读TCP位姿；不会创建机械臂控制接口
 # 安全观察点测试：仅按 P 后移动到目标上方；不初始化夹爪、不下降、不抓取。
@@ -148,8 +130,7 @@ def main():
         raise RuntimeError("ENABLE_ROBOT_GRASP 与 ENABLE_SAFE_APPROACH_TEST 不能同时开启")
     if ENABLE_SAFE_DESCENT_TEST and not ENABLE_SAFE_APPROACH_TEST:
         raise RuntimeError("ENABLE_SAFE_DESCENT_TEST 需要先开启 ENABLE_SAFE_APPROACH_TEST")
-    robot_control_enabled = (ENABLE_ROBOT_GRASP or ENABLE_SAFE_APPROACH_TEST
-                             or ENABLE_GENERIC_GRASP)
+    robot_control_enabled = ENABLE_ROBOT_GRASP or ENABLE_SAFE_APPROACH_TEST
 
     # 1. 机器人（手内相机 + 夹爪）
     robot = UR_Robot(
@@ -160,7 +141,7 @@ def main():
         cam2end_path=CAM2END_PATH,
         cam_ini_path=CAM_INI,
         camera_serial=HI_SERIAL,
-        is_use_gripper=ENABLE_ROBOT_GRASP or ENABLE_GENERIC_GRASP,
+        is_use_gripper=ENABLE_ROBOT_GRASP,
         gripper_port=GRIP_PORT,
     )
     robot_state = ReadOnlyRobotState(
@@ -217,11 +198,9 @@ def main():
     approach_ready_streak = 0
     approach_destination = None
     d455_detection_frozen = False
-    scan_pose_reached = False
     observation_active = False
     descent_ready_streak = 0
     locked_grasp_preview = None
-    locked_generic_plan = None
     safe_descent_completed = False
     last_log_time = 0.0
     active_position = None
@@ -232,13 +211,6 @@ def main():
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
     print("  当前目标: %s（双视场文字识别）。" % TEXT_PROMPT)
-    generic_config_errors = generic_motion_config_errors()
-    if ENABLE_GENERIC_TOOL_FLOW:
-        print("  通用抓取：会枚举所有符合 prompt 的实例；多于一个或几何不可靠时拒绝，不自动挑选。")
-        if generic_config_errors:
-            print("  [实体动作锁定] 尚未填写实测配置：" + "；".join(generic_config_errors))
-        else:
-            print("  [通用抓取配置] 实测参数已完整。R 仍需 ENABLE_GENERIC_GRASP=True 才会夹持并仅抬升20mm。")
     if ENABLE_SAFE_APPROACH_TEST:
         print("  P -> 仅到安全观察点：先升至 %.0fmm，再摆正并水平移动到目标上方；不会下降或控制夹爪"
               % (SAFE_TRAVEL_Z_M * 1000.0))
@@ -249,7 +221,6 @@ def main():
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
     print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
-    print("  s -> 移动到固定扫描姿态（必须先在配置中填写 SCAN_TCP_POSE）")
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
     print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
@@ -271,14 +242,10 @@ def main():
                 ho_coord = "D455 detection paused after P"
                 ho_disp = ho_color.copy()
             else:
-                raw_ho_all = detector.detect_all_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
-                raw_ho, ho_selection_reason = select_one(raw_ho_all, D455_MIN_SCORE)
+                raw_ho = detector.detect_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
                 res_ho, ho_status = ho_filter.update(raw_ho)
                 ho_disp = detector.draw(ho_color, res_ho)
                 ho_gate = gate_detection(res_ho, ho_status, "D455")
-                if raw_ho is None and raw_ho_all:
-                    ho_gate = {"passed": False, "reasons": [ho_selection_reason]}
-                    ho_status = "MULTIPLE" if len(raw_ho_all) > 1 else ho_status
                 if res_ho is not None and ho_status == "STABLE":
                     pt = hand_out_result_to_base(ho, res_ho)
                     if pt is not None:
@@ -306,18 +273,12 @@ def main():
             res_hi = None
             hi_camera = None
             tcp_pose = None
-            generic_plan = None
-            generic_reason = "waiting for one stable D435i instance"
             hi_gate = gate_detection(None, hi_status, "D435I")
             if hi_color is not None:
-                raw_hi_all = detector.detect_all(hi_color, hi_depth, robot.camera.scale)
-                raw_hi, hi_selection_reason = select_one(raw_hi_all, D435I_MIN_SCORE)
+                raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
                 res_hi, hi_status = hi_filter.update(raw_hi)
                 hi_disp = detector.draw(hi_color, res_hi)
                 hi_gate = gate_detection(res_hi, hi_status, "D435I")
-                if raw_hi is None and raw_hi_all:
-                    hi_gate = {"passed": False, "reasons": [hi_selection_reason]}
-                    hi_status = "MULTIPLE" if len(raw_hi_all) > 1 else hi_status
                 if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
                     camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                     hi_camera = tuple((camera_mm / 1000.0).tolist())
@@ -333,26 +294,6 @@ def main():
                             state["hi_base"] = (x, y, z)
                             hi_gate = gate_detection(
                                 res_hi, hi_status, "D435I", state["hi_base"])
-                            if ENABLE_GENERIC_TOOL_FLOW and hi_gate["passed"]:
-                                candidate, generic_reason = pixel_grasp_candidate(
-                                    res_hi, hi_depth, robot.camera.scale)
-                                if candidate is not None:
-                                    def hi_pixel_to_base(u, v, z_m):
-                                        camera_point_mm = robot.pixel_to_camera(u, v, z_m * 1000.0)
-                                        _, base_point_mm = robot.camera_to_base(
-                                            camera_point_mm, tcp_pose=tcp_pose)
-                                        point = np.asarray(base_point_mm, dtype=np.float64) / 1000.0
-                                        point[2] += HI_Z_OFFSET
-                                        return point
-                                    generic_plan, generic_reason = base_grasp_plan(
-                                        candidate, robot.cam_intrinsics, hi_pixel_to_base,
-                                        GRIPPER_MIN_JAW_WIDTH_M, GRIPPER_MAX_JAW_WIDTH_M)
-                                    if generic_plan is not None:
-                                        # The candidate uses the central, depth-valid graspable region,
-                                        # rather than a detector box or a changing segmentation centroid.
-                                        state["hi_base"] = generic_plan.target_base_xyz_m
-                                        hi_gate = gate_detection(
-                                            res_hi, hi_status, "D435I", state["hi_base"])
                             coord_name = "HI base"
                         except Exception:
                             x, y, z = hi_camera
@@ -366,8 +307,6 @@ def main():
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
                 alignment_applied=camera_alignment is not None)
             state["association"] = association
-            if generic_plan is not None:
-                association["generic_plan"] = generic_plan
             approach_destination, approach_reason = safe_approach_candidate(association)
             if ENABLE_SAFE_APPROACH_TEST and approach_destination is not None:
                 approach_ready_streak += 1
@@ -401,13 +340,6 @@ def main():
                 association_text = association_status_text(
                     association, ENABLE_SAFE_APPROACH_TEST,
                     approach_ready_streak, approach_reason)
-            if ENABLE_GENERIC_TOOL_FLOW:
-                if generic_plan is not None:
-                    draw_generic_candidate(hi_disp, generic_plan)
-                    association_text = "GRASP CANDIDATE: %.1fmm parallel-jaw width" % (
-                        generic_plan.jaw_width_m * 1000.0)
-                elif hi_status == "STABLE":
-                    association_text = "GRASP REJECTED: " + generic_reason
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
                         hi_status, hi_coord, gate_reason_text(hi_gate), association_text)
             draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
@@ -464,19 +396,9 @@ def main():
                     normalize_tool_pose(robot)
                 else:
                     print("[安全锁定] 纯视觉模式不发送机械臂运动命令。")
-            elif key == ord('s'):
-                if not ENABLE_SAFE_APPROACH_TEST:
-                    print("[安全锁定] 扫描姿态需要 ENABLE_SAFE_APPROACH_TEST=True 才会发送运动。")
-                elif SCAN_TCP_POSE is None:
-                    print("[安全锁定] 请先由示教器记录并填写 SCAN_TCP_POSE。")
-                elif move_to_scan_pose(robot, SCAN_TCP_POSE):
-                    scan_pose_reached = True
-                    print("[扫描姿态] 已到达，D455 现在可用于全局搜索。")
             elif key == ord('p'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
-                elif ENABLE_GENERIC_TOOL_FLOW and not scan_pose_reached:
-                    print("[安全锁定] 先按 s 到达已示教的 SCAN_TCP_POSE，避免夹爪遮挡 D455。")
                 elif approach_destination is None:
                     print("[安全锁定] 双相机尚未通过安全观察点门槛：%s" % approach_reason)
                 elif approach_ready_streak < SAFE_APPROACH_CONFIRM_FRAMES:
@@ -496,8 +418,6 @@ def main():
                     print("[安全锁定] 本次运行已完成一次无接触下降；请重启程序后再测试。")
                 elif not observation_active:
                     print("[安全锁定] 请先完成 P 键安全观察点移动。")
-                elif ENABLE_GENERIC_TOOL_FLOW and generic_plan is None:
-                    print("[安全锁定] 没有可靠的通用抓取候选：%s" % generic_reason)
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
                 elif descent_ready_streak < SAFE_DESCENT_CONFIRM_FRAMES:
@@ -506,25 +426,13 @@ def main():
                 else:
                     if move_to_safe_descent_test(robot, grasp_preview):
                         locked_grasp_preview = dict(grasp_preview)
-                        locked_generic_plan = generic_plan
                         safe_descent_completed = True
                         print("[无接触下降] 已锁定D键触发时的目标中心；后续画面不再跟随分割中心漂移。")
-            elif key == ord('r'):
-                if not ENABLE_GENERIC_GRASP:
-                    print("[安全锁定] R 键需先将 ENABLE_GENERIC_GRASP 改为 True；默认不夹持。")
-                elif generic_motion_config_errors():
-                    print("[安全锁定] 通用抓取实测配置未完成：" +
-                          "；".join(generic_motion_config_errors()))
-                elif not (scan_pose_reached and observation_active and safe_descent_completed):
-                    print("[安全锁定] R 只允许在 s、P、D 都成功后执行。")
-                elif locked_generic_plan is None:
-                    print("[安全锁定] 没有已锁定的通用抓取候选。")
-                elif generic_plan is None or grasp_plan_changed(locked_generic_plan, generic_plan):
-                    print("[安全锁定] 当前工具候选已变化；请重新从扫描姿态开始。")
-                else:
-                    execute_generic_test_grasp(robot, locked_generic_plan)
             elif key == ord('g'):
-                print("[安全锁定] 旧圆柱 g 流程已停用。通用工具请先完成 s、P、D，最后使用 R。")
+                if ENABLE_ROBOT_GRASP:
+                    do_grasp(robot, detector, state)
+                else:
+                    print("[安全锁定] 当前仅验证识别与坐标。确认无误后将 ENABLE_ROBOT_GRASP 改为 True。")
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
@@ -617,131 +525,6 @@ def point_in_workspace(point):
     """Return whether an XYZ base-frame point is strictly inside the configured workspace."""
     return all(float(low) <= float(value) <= float(high)
                for value, (low, high) in zip(point, WORKSPACE_LIMITS))
-
-
-def generic_motion_config_errors():
-    """Return all missing/unsafe physical measurements; visual planning stays available."""
-    required = {
-        "SCAN_TCP_POSE": SCAN_TCP_POSE,
-        "GRIPPER_YAW_OFFSET_RAD": GRIPPER_YAW_OFFSET_RAD,
-        "GRIPPER_LOWEST_POINT_OFFSET_M": GRIPPER_LOWEST_POINT_OFFSET_M,
-        "GRIPPER_CONTACT_OFFSET_M": GRIPPER_CONTACT_OFFSET_M,
-        "SUPPORT_TOP_Z_M": SUPPORT_TOP_Z_M,
-        "MIN_SUPPORT_CLEARANCE_M": MIN_SUPPORT_CLEARANCE_M,
-        "GRIPPER_MIN_JAW_WIDTH_M": GRIPPER_MIN_JAW_WIDTH_M,
-        "GRIPPER_MAX_JAW_WIDTH_M": GRIPPER_MAX_JAW_WIDTH_M,
-    }
-    missing = [name for name, value in required.items() if value is None]
-    if SCAN_TCP_POSE is not None:
-        try:
-            pose = np.asarray(SCAN_TCP_POSE, dtype=float).reshape(-1)
-            if pose.size != 6 or not np.all(np.isfinite(pose)) or not point_in_workspace(pose[:3]):
-                missing.append("SCAN_TCP_POSE invalid/outside workspace")
-        except Exception:
-            missing.append("SCAN_TCP_POSE invalid")
-    if (GRIPPER_MIN_JAW_WIDTH_M is not None and GRIPPER_MAX_JAW_WIDTH_M is not None
-            and float(GRIPPER_MIN_JAW_WIDTH_M) >= float(GRIPPER_MAX_JAW_WIDTH_M)):
-        missing.append("gripper jaw width range invalid")
-    return missing
-
-
-def move_to_scan_pose(robot, scan_pose):
-    """Reach an operator-taught high scan pose without a low horizontal sweep."""
-    pose = np.asarray(scan_pose, dtype=np.float64).reshape(-1)
-    if pose.size != 6 or not point_in_workspace(pose[:3]) or pose[2] < SAFE_TRAVEL_Z_M:
-        print("[安全中止] SCAN_TCP_POSE 必须是工作空间内、z≥%.3fm 的六维示教位姿。" % SAFE_TRAVEL_Z_M)
-        return False
-    try:
-        current = _read_valid_tcp_pose(robot)
-        lift = current.copy(); lift[2] = max(current[2], SAFE_TRAVEL_Z_M)
-        if lift[2] > current[2] + 0.001:
-            robot.moveL(lift.tolist(), speed=SAFE_APPROACH_SPEED, acceleration=SAFE_APPROACH_ACCELERATION)
-        rotate = lift.copy(); rotate[3:6] = pose[3:6]
-        robot.moveL(rotate.tolist(), speed=SAFE_APPROACH_SPEED, acceleration=SAFE_APPROACH_ACCELERATION)
-        horizontal = pose.copy(); horizontal[2] = max(pose[2], SAFE_TRAVEL_Z_M)
-        robot.moveL(horizontal.tolist(), speed=SAFE_APPROACH_SPEED, acceleration=SAFE_APPROACH_ACCELERATION)
-        print("[扫描姿态] 已到达 %s" % ["%.4f" % v for v in horizontal])
-        return True
-    except Exception as exc:
-        print("[安全中止] 无法到达扫描姿态：%s" % exc)
-        return False
-
-
-def draw_generic_candidate(image, plan):
-    candidate = plan.candidate
-    start, end = candidate.axis_start_px, candidate.axis_end_px
-    center = candidate.center_px
-    color = (255, 255, 0)
-    cv2.line(image, start, end, color, 2)
-    cv2.circle(image, center, 12, color, 2)
-    cv2.putText(image, "generic grasp %.1fmm" % (plan.jaw_width_m * 1000.0),
-                (center[0] + 14, center[1] + 20), cv2.FONT_HERSHEY_SIMPLEX,
-                0.44, color, 1, cv2.LINE_AA)
-
-
-def grasp_plan_changed(locked, current, tolerance_m=0.010):
-    """Reject R if either position or tool axis changed after D was verified."""
-    delta = np.linalg.norm(np.asarray(locked.target_base_xyz_m) -
-                           np.asarray(current.target_base_xyz_m))
-    axis_dot = abs(float(np.dot(locked.axis_base_xy, current.axis_base_xy)))
-    return delta > tolerance_m or axis_dot < np.cos(np.deg2rad(10.0))
-
-
-def generic_tool_orientation(plan):
-    """Point down, with parallel jaws perpendicular to the tool's 2-D long axis."""
-    axis_yaw = float(np.arctan2(plan.axis_base_xy[1], plan.axis_base_xy[0]))
-    yaw = axis_yaw + np.pi / 2.0 + float(GRIPPER_YAW_OFFSET_RAD)
-    down_R, _ = cv2.Rodrigues(np.asarray(TOOL_ORIENTATION, dtype=np.float64).reshape(3, 1))
-    yaw_R = np.array([[np.cos(yaw), -np.sin(yaw), 0.0],
-                      [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
-    rvec, _ = cv2.Rodrigues(yaw_R @ down_R)
-    return rvec.reshape(3).tolist()
-
-
-def execute_generic_test_grasp(robot, plan):
-    """Low-force one-shot grasp and 20 mm lift; any failure stops later motion."""
-    target = np.asarray(plan.target_base_xyz_m, dtype=np.float64)
-    contact_z = target[2] + float(GRIPPER_CONTACT_OFFSET_M)
-    lowest_z = contact_z - float(GRIPPER_LOWEST_POINT_OFFSET_M)
-    required_lowest = float(SUPPORT_TOP_Z_M) + float(MIN_SUPPORT_CLEARANCE_M)
-    if lowest_z < required_lowest:
-        print("[安全中止] 预测夹爪最低点 %.1fmm 低于支撑净空 %.1fmm。" %
-              (lowest_z * 1000.0, required_lowest * 1000.0))
-        return False
-    orientation = generic_tool_orientation(plan)
-    pregrasp = target.copy(); pregrasp[2] = contact_z + GENERIC_PREGRASP_HEIGHT_M
-    contact = target.copy(); contact[2] = contact_z
-    lift = contact.copy(); lift[2] += GENERIC_TEST_LIFT_M
-    if not all(point_in_workspace(point) for point in (pregrasp, contact, lift)):
-        print("[安全中止] 通用抓取路径超出工作空间。")
-        return False
-    try:
-        current = _read_valid_tcp_pose(robot)
-        high = current.copy(); high[:2] = target[:2]; high[2] = max(current[2], SAFE_TRAVEL_Z_M); high[3:6] = orientation
-        print("[通用抓取] 高位对准、低速预抓取、低力闭爪、仅抬升20mm。")
-        robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-        robot.moveL(high.tolist(), speed=GENERIC_GRASP_SPEED, acceleration=GENERIC_GRASP_SPEED)
-        robot.moveL(pregrasp.tolist() + orientation, speed=GENERIC_GRASP_SPEED, acceleration=GENERIC_GRASP_SPEED)
-        robot.moveL(contact.tolist() + orientation, speed=GENERIC_GRASP_SPEED, acceleration=GENERIC_GRASP_SPEED)
-        robot.grip(GRIP_CLOSE_POS, GRIP_SPEED, GENERIC_GRASP_FORCE)
-        torque_reached = robot.read_torque_reached()
-        torque_current = robot.read_torque_current()
-        if torque_reached != 1 and (torque_current < 0 or torque_current < GRIP_TORQUE_MIN):
-            print("[安全中止] 低力夹持未确认接触（reached=%s, torque=%s）；不执行抬升。" %
-                  (torque_reached, torque_current))
-            return False
-        robot.moveL(lift.tolist() + orientation, speed=GENERIC_GRASP_SPEED, acceleration=GENERIC_GRASP_SPEED)
-        print("[通用抓取完成] reached=%s torque=%s；已低力夹持并测试抬升20mm，请人工确认夹持状态。" %
-              (torque_reached, torque_current))
-        return True
-    except Exception as exc:
-        print("[安全中止] 通用抓取失败：%s" % exc)
-        try:
-            if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
-                robot.rtde_c.stopL(1.0)
-        except Exception:
-            pass
-        return False
 
 
 def safe_approach_candidate(association):

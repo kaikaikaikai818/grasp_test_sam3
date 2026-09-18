@@ -83,32 +83,26 @@ class SamToolDetector:
         results = self.detect_all(bgr, depth_raw, depth_scale)
         return results[0] if results else None
 
-    def detect_all_roi(self, bgr, depth_raw, depth_scale, roi):
-        """Detect every prompt instance in a crop and restore full-frame coordinates."""
+    def detect_roi(self, bgr, depth_raw, depth_scale, roi):
+        """Detect in an enlarged workspace crop, then restore full-frame coordinates."""
         height, width = bgr.shape[:2]
         x1, y1, x2, y2 = [int(value) for value in roi]
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(width, x2), min(height, y2)
         if x2 <= x1 or y2 <= y1:
             raise ValueError("D455_ROI 无效，请检查 (x1, y1, x2, y2)。")
-        results = self.detect_all(bgr[y1:y2, x1:x2], depth_raw[y1:y2, x1:x2], depth_scale)
-        restored_results = []
-        for result in results:
-            restored = dict(result)
-            u, v = result["center"]
-            bx1, by1, bx2, by2 = result["box"]
-            full_mask = np.zeros((height, width), dtype=bool)
-            full_mask[y1:y2, x1:x2] = result["mask"]
-            restored["center"] = (u + x1, v + y1)
-            restored["box"] = (bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)
-            restored["mask"] = full_mask
-            restored_results.append(restored)
-        return restored_results
-
-    def detect_roi(self, bgr, depth_raw, depth_scale, roi):
-        """Backward-compatible single-result variant of :meth:`detect_all_roi`."""
-        results = self.detect_all_roi(bgr, depth_raw, depth_scale, roi)
-        return results[0] if results else None
+        result = self.detect(bgr[y1:y2, x1:x2], depth_raw[y1:y2, x1:x2], depth_scale)
+        if result is None:
+            return None
+        restored = dict(result)
+        u, v = result["center"]
+        bx1, by1, bx2, by2 = result["box"]
+        full_mask = np.zeros((height, width), dtype=bool)
+        full_mask[y1:y2, x1:x2] = result["mask"]
+        restored["center"] = (u + x1, v + y1)
+        restored["box"] = (bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)
+        restored["mask"] = full_mask
+        return restored
 
     @staticmethod
     def draw(bgr, result, color=(0, 255, 0)):
