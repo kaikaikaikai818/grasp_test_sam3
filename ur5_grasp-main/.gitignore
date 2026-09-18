@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 .idea/
 .vscode/
+grasp_surface_calibration.json
 .venv/
 venv/
