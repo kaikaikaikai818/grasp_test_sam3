@@ -17,7 +17,9 @@ class PixelGraspCandidate:
     center_px: tuple[int, int]
     depth_m: float
     axis_start_px: tuple[int, int]
+    axis_start_depth_m: float
     axis_end_px: tuple[int, int]
+    axis_end_depth_m: float
     width_px: float
     aspect_ratio: float
 
@@ -87,11 +89,21 @@ def pixel_grasp_candidate(result: dict, depth_raw: np.ndarray, depth_scale: floa
     width_px = float(np.percentile(t[middle], 90) - np.percentile(t[middle], 10))
     start = pinch_center - axis * extent * 0.30
     end = pinch_center + axis * extent * 0.30
+    # Use the depth observed near each end of the axis.  Reusing the central
+    # depth falsely collapses a perspective-viewed or slightly tilted tool.
+    start_band = np.abs(s - np.median(s) + extent * 0.30) <= max(3.0, extent * 0.05)
+    end_band = np.abs(s - np.median(s) - extent * 0.30) <= max(3.0, extent * 0.05)
+    if not start_band.any() or not end_band.any():
+        return None, "tool-axis endpoint depth unavailable"
+    start_depth = float(np.median(depth_m[ys[start_band], xs[start_band]]))
+    end_depth = float(np.median(depth_m[ys[end_band], xs[end_band]]))
     return PixelGraspCandidate(
         center_px=(int(round(pinch_center[0])), int(round(pinch_center[1]))),
         depth_m=z,
         axis_start_px=(int(round(start[0])), int(round(start[1]))),
+        axis_start_depth_m=start_depth,
         axis_end_px=(int(round(end[0])), int(round(end[1]))),
+        axis_end_depth_m=end_depth,
         width_px=width_px,
         aspect_ratio=aspect,
     ), "central pinch band"
@@ -102,8 +114,8 @@ def base_grasp_plan(candidate: PixelGraspCandidate, intrinsics: np.ndarray,
                     min_jaw_width_m: Optional[float], max_jaw_width_m: Optional[float]) -> tuple[Optional[BaseGraspPlan], str]:
     """Convert a pixel candidate into a base-frame target and horizontal axis."""
     center = np.asarray(pixel_to_base(*candidate.center_px, candidate.depth_m), dtype=np.float64).reshape(3)
-    start = np.asarray(pixel_to_base(*candidate.axis_start_px, candidate.depth_m), dtype=np.float64).reshape(3)
-    end = np.asarray(pixel_to_base(*candidate.axis_end_px, candidate.depth_m), dtype=np.float64).reshape(3)
+    start = np.asarray(pixel_to_base(*candidate.axis_start_px, candidate.axis_start_depth_m), dtype=np.float64).reshape(3)
+    end = np.asarray(pixel_to_base(*candidate.axis_end_px, candidate.axis_end_depth_m), dtype=np.float64).reshape(3)
     direction = end[:2] - start[:2]
     length = float(np.linalg.norm(direction))
     if length < 0.005:
