@@ -17,6 +17,7 @@ from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.screwdriver_grasp import (find_screwdriver_handle,
                                                fit_horizontal_support_plane,
+                                               estimate_handle_thickness,
                                                result_at_handle, save_calibration)
 
 ROOT = Path(__file__).resolve().parent
@@ -48,7 +49,7 @@ def main():
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     print("[只读标定] 本脚本不会发送机械臂运动或夹爪命令。")
     if args.mode == "plane":
-        print("移开螺丝刀，让 D435i 看见空纸箱顶面；点击画面后按小写 s 保存。q 退出。")
+        print("移开螺丝刀，让 D435i 看见空支撑面（桌面/底板）；点击画面后按小写 s 保存。q 退出。")
     else:
         print("放回螺丝刀，用示教器将张开的夹爪手动放到手柄中段的目标夹持高度。")
         print("画面显示 HANDLE STABLE 后，点击画面按小写 k 保存 TCP 偏移。q 退出。")
@@ -86,7 +87,12 @@ def main():
                         selected = result_at_handle(result, handle)
                         image = detector.draw(image, selected)
                         cv2.circle(image, handle.center_px, 12, (255, 255, 0), 2)
-                        status = "HANDLE %s  z=%.1fmm" % (tracking, handle.depth_m * 1000.0)
+                        diameter_est, _ = estimate_handle_thickness(
+                            handle.radius_px, handle.depth_m,
+                            float(robot.cam_intrinsics[0, 0]))
+                        status = "HANDLE %s  top=%.1fmm median=%.1fmm  D~%.1fmm" % (
+                            tracking, handle.depth_m * 1000.0, handle.median_depth_m * 1000.0,
+                            (diameter_est * 1000.0) if diameter_est is not None else -1.0)
                     else:
                         status = "HANDLE REJECTED: " + reason
                 else:
@@ -115,7 +121,7 @@ def main():
                              "support_plane_inlier_count": plane.inlier_count,
                              "plane_calibrated_at": datetime.now().astimezone().isoformat(timespec="seconds")})
                 save_calibration(CALIBRATION_PATH, data)
-                print("[已保存] 纸箱顶面 z=%.4fm -> %s" % (plane.z_m, CALIBRATION_PATH))
+                print("[已保存] 支撑面 z=%.4fm -> %s" % (plane.z_m, CALIBRATION_PATH))
             if args.mode == "contact" and key == ord("k"):
                 if tcp is None or handle is None or selected is None or plane is None:
                     print("[拒绝保存] 等待稳定手柄、支撑平面和只读 TCP。")
@@ -125,19 +131,34 @@ def main():
                     print("[拒绝保存] 请先运行 plane 标定。")
                     continue
                 target = pixel_to_base(*handle.center_px, handle.depth_m)
+                focal_px = float(robot.cam_intrinsics[0, 0])
+                thickness, thickness_reason = estimate_handle_thickness(
+                    handle.radius_px, handle.depth_m, focal_px)
                 tcp_clearance = float(tcp[2] - plane.z_m)
                 offset = float(tcp[2] - target[2])
+                if thickness is None:
+                    print("[拒绝保存] 无法估算手柄直径：%s" % thickness_reason)
+                    continue
+                if not (0.010 <= thickness <= 0.100):
+                    print("[拒绝保存] 估算手柄直径 %.1fmm 不合理（应在 10~100mm），"
+                          "请让 D435i 完整看到手柄。" % (thickness * 1000.0))
+                    continue
+                gripper_offset = float(tcp[2] - (plane.z_m + thickness / 2.0))
                 if tcp_clearance <= 0.010:
-                    print("[拒绝保存] TCP 离纸箱顶面不足 10mm。")
+                    print("[拒绝保存] TCP 离支撑面不足 10mm。")
                     continue
                 data.update({"contact_offset_m": offset,
                              "minimum_tcp_plane_clearance_m": tcp_clearance - 0.003,
-                             "handle_surface_above_plane_m": float(target[2] - plane.z_m),
+                             "handle_surface_above_plane_m": thickness,
+                             "gripper_offset_m": gripper_offset,
+                             "handle_radius_px": float(handle.radius_px),
                              "contact_calibrated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                              "prompt": args.prompt})
                 save_calibration(CALIBRATION_PATH, data)
-                print("[已保存] TCP-手柄表面偏移=%.1fmm，最小TCP平面净空=%.1fmm" %
-                      (offset * 1000.0, (tcp_clearance - 0.003) * 1000.0))
+                print("[已保存] 估算手柄直径=%.1fmm，夹爪偏移=%.1fmm，TCP-手柄顶面=%.1fmm，"
+                      "最小TCP平面净空=%.1fmm" %
+                      (thickness * 1000.0, gripper_offset * 1000.0, offset * 1000.0,
+                       (tcp_clearance - 0.003) * 1000.0))
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()

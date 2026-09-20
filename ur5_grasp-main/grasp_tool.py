@@ -37,9 +37,11 @@ from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
 from bsp.camera_bsp.camera_profile import max_intrinsics_delta
-from bsp.camera_bsp.screwdriver_grasp import (find_screwdriver_handle,
+from bsp.camera_bsp.screwdriver_grasp import (estimate_handle_thickness,
+                                               find_screwdriver_handle,
                                                fit_horizontal_support_plane,
-                                               load_calibration, result_at_handle)
+                                               load_calibration, plan_grasp_tcp,
+                                               result_at_handle)
 
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -54,7 +56,7 @@ ENABLE_SAFE_APPROACH_TEST = True
 # 无接触下降测试：只在观察点确认后按 D 低速下降到工具上方；默认关闭。
 ENABLE_SAFE_DESCENT_TEST = True
 # D455 工作台区域：(左, 上, 右, 下)。缩小范围可放大远处的小工具。
-D455_ROI = (130, 80, 530, 420)
+D455_ROI = (170, 95, 500, 370)
 STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为稳定
 # 视觉验收门槛。这里只决定坐标是否值得记录，不会授权机械臂运动。
 D455_MIN_SCORE = 0.35
@@ -79,9 +81,10 @@ SAFE_DESCENT_CONFIRM_FRAMES = 3
 SAFE_DESCENT_SPEED = 0.01
 SAFE_DESCENT_ACCELERATION = 0.01
 SCREWDRIVER_GRASP_SPEED = 0.01
-SCREWDRIVER_GRASP_FORCE = 20
-SCREWDRIVER_TEST_LIFT_M = 0.020
-SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.008
+SCREWDRIVER_GRASP_FORCE = 30
+SCREWDRIVER_TEST_LIFT_M = 0.050
+SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
+SCREWDRIVER_R_START_TOL_M = 0.015
 SUPPORT_PLANE_SHIFT_MAX_M = 0.008
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
@@ -147,6 +150,7 @@ def main():
         raise RuntimeError("ENABLE_SAFE_DESCENT_TEST 需要先开启 ENABLE_SAFE_APPROACH_TEST")
     robot_control_enabled = (ENABLE_ROBOT_GRASP or ENABLE_SAFE_APPROACH_TEST
                              or ENABLE_SCREWDRIVER_GRASP)
+    gripper_enabled = ENABLE_ROBOT_GRASP or ENABLE_SCREWDRIVER_GRASP
 
     # 1. 机器人（手内相机 + 夹爪）
     robot = UR_Robot(
@@ -157,7 +161,7 @@ def main():
         cam2end_path=CAM2END_PATH,
         cam_ini_path=CAM_INI,
         camera_serial=HI_SERIAL,
-        is_use_gripper=ENABLE_ROBOT_GRASP or ENABLE_SCREWDRIVER_GRASP,
+        is_use_gripper=gripper_enabled,
         gripper_port=GRIP_PORT,
     )
     robot_state = ReadOnlyRobotState(
@@ -213,6 +217,9 @@ def main():
              "hi_base": None, "association": None}
     approach_ready_streak = 0
     approach_destination = None
+    coarse_ready_streak = 0
+    coarse_destination = None
+    coarse_reason = None
     d455_detection_frozen = False
     observation_active = False
     descent_ready_streak = 0
@@ -238,7 +245,7 @@ def main():
         if screwdriver_calibration is None:
             print("  [螺丝刀抓取锁定] 尚未完成深度标定：运行 calibrate_screwdriver_grasp.py plane/contact。")
         else:
-            print("  [螺丝刀标定] 已加载：纸箱顶面 z=%.4fm。R 键仍需 ENABLE_SCREWDRIVER_GRASP=True。" %
+            print("  [螺丝刀标定] 已加载：支撑面 z=%.4fm。R 键仍需 ENABLE_SCREWDRIVER_GRASP=True。" %
                   screwdriver_calibration["support_plane_z_m"])
     if ENABLE_SAFE_APPROACH_TEST:
         print("  P -> 仅到安全观察点：先升至 %.0fmm，再摆正并水平移动到目标上方；不会下降或控制夹爪"
@@ -246,10 +253,12 @@ def main():
         print("      仅当双相机连续 %d 帧一致且误差≤%.0fmm 时允许执行。"
               % (SAFE_APPROACH_CONFIRM_FRAMES,
                  SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0))
+        print("  a -> D455单相机粗定位：腕部相机看不到工具时，仅用D455对齐坐标移动到目标上方。")
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
-    print("  R -> 螺丝刀低力夹持并仅抬升20mm（需完成 plane/contact 标定，默认锁定）")
+    print("  R -> 螺丝刀低力夹持并抬升 %.0fmm（需完成 plane/contact 标定，默认锁定）"
+          % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
     print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
@@ -373,8 +382,22 @@ def main():
                 approach_ready_streak += 1
             else:
                 approach_ready_streak = 0
+            coarse_destination, coarse_reason = coarse_approach_candidate(
+                state["ho_base_aligned"], ho_gate, camera_alignment is not None)
+            if ENABLE_SAFE_APPROACH_TEST and coarse_destination is not None:
+                coarse_ready_streak += 1
+            else:
+                coarse_ready_streak = 0
+            handle_thickness = None
+            if hi_handle is not None:
+                handle_thickness, _ = estimate_handle_thickness(
+                    hi_handle.radius_px, hi_handle.depth_m,
+                    float(robot.cam_intrinsics[0, 0]))
             grasp_preview = build_grasp_preview(
-                state["hi_base"], hi_gate, observation_active)
+                state["hi_base"], hi_gate, observation_active,
+                support_plane=current_support_plane,
+                calibration=screwdriver_calibration,
+                handle_thickness_m=handle_thickness)
             if observation_active and grasp_preview.get("ready"):
                 descent_ready_streak += 1
             else:
@@ -440,23 +463,38 @@ def main():
                 print("[位置标记] %s：已清空旧稳定历史，等待两台相机重新 STABLE + PASS。"
                       % active_position)
             elif key == ord('o'):
-                if ENABLE_ROBOT_GRASP:
+                if gripper_enabled:
                     robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
                     print("[夹爪] 张开 pos=%d" % GRIP_OPEN_POS)
                 else:
-                    print("[安全锁定] 纯视觉模式不控制夹爪。")
+                    print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('c'):
-                if ENABLE_ROBOT_GRASP:
+                if gripper_enabled:
                     robot.grip(GRIP_CLOSE_POS, GRIP_SPEED, GRIP_FORCE)
                     print("[夹爪] 闭合 pos=%d" % GRIP_CLOSE_POS)
                 else:
-                    print("[安全锁定] 纯视觉模式不控制夹爪。")
+                    print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('t'):
                 if ENABLE_ROBOT_GRASP:
                     print("[姿态测试] 仅执行安全升高和末端摆正，不执行抓取")
                     normalize_tool_pose(robot)
                 else:
                     print("[安全锁定] 纯视觉模式不发送机械臂运动命令。")
+            elif key == ord('a'):
+                if not ENABLE_SAFE_APPROACH_TEST:
+                    print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
+                elif coarse_destination is None:
+                    print("[安全锁定] D455 粗定位尚不可用：%s" % coarse_reason)
+                elif coarse_ready_streak < SAFE_APPROACH_CONFIRM_FRAMES:
+                    print("[安全锁定] D455 稳定帧不足：%d/%d。请保持目标静止。" %
+                          (coarse_ready_streak, SAFE_APPROACH_CONFIRM_FRAMES))
+                else:
+                    print("[D455粗定位] 仅用D455对齐坐标移动到目标上方；腕部相机此时可能还看不到工具。")
+                    if move_to_safe_observation(robot, coarse_destination):
+                        d455_detection_frozen = True
+                        observation_active = True
+                        ho_filter.reset()
+                        print("[D455粗定位完成] 已停在目标上方；请等 D435i 稳定后按 D。")
             elif key == ord('p'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -478,7 +516,7 @@ def main():
                 elif safe_descent_completed:
                     print("[安全锁定] 本次运行已完成一次无接触下降；请重启程序后再测试。")
                 elif not observation_active:
-                    print("[安全锁定] 请先完成 P 键安全观察点移动。")
+                    print("[安全锁定] 请先完成 a（D455粗定位）或 P（双相机观察点）。")
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
                 elif descent_ready_streak < SAFE_DESCENT_CONFIRM_FRAMES:
@@ -493,6 +531,9 @@ def main():
                                 "support_plane_z_m": (current_support_plane.z_m
                                                        if current_support_plane is not None else None),
                             }
+                            if grasp_preview.get("adaptive"):
+                                locked_screwdriver_handle["grasp_tcp_z_m"] = float(
+                                    grasp_preview["endpoint_xyz_m"][2])
                         safe_descent_completed = True
                         print("[无接触下降] 已锁定D键触发时的目标中心；后续画面不再跟随分割中心漂移。")
             elif key == ord('r'):
@@ -504,25 +545,23 @@ def main():
                     print("[安全锁定] 未找到有效 grasp_surface_calibration.json。")
                 elif not safe_descent_completed or locked_screwdriver_handle is None:
                     print("[安全锁定] 请先完成 P 和 D 无接触下降测试。")
+                elif "grasp_tcp_z_m" not in locked_screwdriver_handle:
+                    print("[安全锁定] D 未记录自适应夹持高度；请重新运行 P → D。")
                 elif not (hi_gate["passed"] and hi_handle is not None and current_support_plane is not None):
-                    print("[安全锁定] 等待稳定手柄区域和当前纸箱平面。")
+                    print("[安全锁定] 等待稳定手柄区域和当前支撑面。")
                 else:
                     current_target = np.asarray(state["hi_base"], dtype=np.float64)
                     locked_target = np.asarray(locked_screwdriver_handle["target_base_xyz_m"], dtype=np.float64)
                     target_shift = float(np.linalg.norm(current_target - locked_target))
-                    handle_height_shift = abs(
-                        (current_target[2] - current_support_plane.z_m) -
-                        float(screwdriver_calibration["handle_surface_above_plane_m"]))
                     if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
                         print("[安全锁定] 手柄目标在 D 后移动 %.1fmm；请重新运行 P → D。" %
                               (target_shift * 1000.0))
-                    elif handle_height_shift > SUPPORT_PLANE_SHIFT_MAX_M:
-                        print("[安全锁定] 手柄相对纸箱平面的高度变化 %.1fmm；请重新进行 contact 标定。" %
-                              (handle_height_shift * 1000.0))
                     else:
-                        execute_screwdriver_grasp(robot, locked_target,
-                                                   current_support_plane.z_m,
-                                                   screwdriver_calibration)
+                        execute_screwdriver_grasp(
+                            robot, locked_target,
+                            float(locked_screwdriver_handle["grasp_tcp_z_m"]),
+                            current_support_plane.z_m,
+                            screwdriver_calibration)
             elif key == ord('g'):
                 print("[安全锁定] 旧圆柱 g 流程不用于螺丝刀。螺丝刀请在标定后使用 R。")
     finally:
@@ -647,8 +686,38 @@ def safe_approach_candidate(association):
     return destination.tolist(), None
 
 
-def build_grasp_preview(hi_base, hi_gate, observation_active):
-    """Calculate a virtual D435i-only descent plan; it never authorizes motion."""
+def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied):
+    """Build a D455-only coarse observation pose when the wrist camera cannot see the tool.
+
+    Used at startup, before the arm has moved, so the wrist D435i has no target
+    yet.  It only moves to a high observation point; D still requires the D435i
+    to confirm the tool before any descent.  The saved D455/D435 alignment is
+    mandatory because the raw D455 coordinate carries a systematic offset.
+    """
+    if not ho_gate or not ho_gate.get("passed") or ho_base_aligned is None:
+        return None, "waiting for stable D455 target"
+    if not alignment_applied:
+        return None, "camera alignment file not loaded"
+    target = np.asarray(ho_base_aligned, dtype=np.float64)
+    if not point_in_workspace(target):
+        return None, "D455 target outside workspace"
+
+    destination = target.copy()
+    destination[2] = max(float(target[2]) + APPROACH_HEIGHT_M, SAFE_TRAVEL_Z_M)
+    if not point_in_workspace(destination):
+        return None, "coarse observation point outside workspace"
+    return destination.tolist(), None
+
+
+def build_grasp_preview(hi_base, hi_gate, observation_active,
+                        support_plane=None, calibration=None,
+                        handle_thickness_m=None):
+    """Plan the descent to the handle mid using the adaptive grasp model.
+
+    The handle thickness is estimated from its projected width every attempt, and
+    the tool-independent ``gripper_offset_m`` converts the handle mid height into
+    a TCP height.  A different screwdriver therefore needs no new calibration.
+    """
     preview = {"active": bool(observation_active), "ready": False}
     if not observation_active:
         return preview
@@ -660,20 +729,50 @@ def build_grasp_preview(hi_base, hi_gate, observation_active):
         preview["reason"] = "D435i target outside workspace"
         return preview
 
-    # The endpoint deliberately remains 25 mm above the measured top surface.
-    # It is a visual aid for the future grasp stage, never a contact command.
+    plan = None
+    grasp_tcp_z = None
+    if (calibration is not None and support_plane is not None
+            and handle_thickness_m is not None):
+        grasp_tcp_z, plan = plan_grasp_tcp(
+            float(handle_thickness_m), float(support_plane.z_m),
+            float(calibration["gripper_offset_m"]))
+
+    if grasp_tcp_z is None:
+        # Fall back to a visual-only preview (no adaptive grasp geometry).
+        endpoint = target.copy()
+        pregrasp = target.copy()
+        pregrasp[2] = min(target[2] + GRASP_PREVIEW_HEIGHT_M, WORKSPACE_LIMITS[2][1])
+        if not point_in_workspace(endpoint) or not point_in_workspace(pregrasp):
+            preview["reason"] = "virtual point outside workspace"
+            return preview
+        if pregrasp[2] <= endpoint[2]:
+            preview["reason"] = "virtual descent has no clearance"
+            return preview
+        preview.update({
+            "ready": True,
+            "adaptive": False,
+            "reason": plan if isinstance(plan, str) else "grasp plan unavailable",
+            "target_surface_xyz_m": target.tolist(),
+            "pregrasp_xyz_m": pregrasp.tolist(),
+            "endpoint_xyz_m": endpoint.tolist(),
+            "descent_m": float(pregrasp[2] - endpoint[2]),
+        })
+        return preview
+
     endpoint = target.copy()
-    endpoint[2] += GRASP_PREVIEW_SURFACE_CLEARANCE_M
+    endpoint[2] = grasp_tcp_z
     pregrasp = target.copy()
-    pregrasp[2] = min(target[2] + GRASP_PREVIEW_HEIGHT_M, WORKSPACE_LIMITS[2][1])
+    pregrasp[2] = min(grasp_tcp_z + GRASP_PREVIEW_HEIGHT_M, WORKSPACE_LIMITS[2][1])
     if not point_in_workspace(endpoint) or not point_in_workspace(pregrasp):
-        preview["reason"] = "virtual point outside workspace"
+        preview["reason"] = "grasp point outside workspace"
         return preview
     if pregrasp[2] <= endpoint[2]:
-        preview["reason"] = "virtual descent has no clearance"
+        preview["reason"] = "grasp descent has no clearance"
         return preview
     preview.update({
         "ready": True,
+        "adaptive": True,
+        "plan": plan,
         "target_surface_xyz_m": target.tolist(),
         "pregrasp_xyz_m": pregrasp.tolist(),
         "endpoint_xyz_m": endpoint.tolist(),
@@ -755,8 +854,9 @@ def gate_detection(result, tracking_status, camera_name, base_xyz=None):
     x1, y1, x2, y2 = result.get("box", (0, 0, 0, 0))
     if min(x2 - x1, y2 - y1) < MIN_BOX_SIDE_PX:
         reasons.append("box too small")
-    if int(result.get("valid_depth_points", 0)) < MIN_VALID_DEPTH_POINTS:
-        reasons.append("too few depth points")
+    depth_points = int(result.get("valid_depth_points", 0))
+    if depth_points < MIN_VALID_DEPTH_POINTS:
+        reasons.append("too few depth points (%d<%d)" % (depth_points, MIN_VALID_DEPTH_POINTS))
     if result.get("z_mm") is None:
         reasons.append("invalid depth")
 
@@ -1027,9 +1127,15 @@ def move_to_safe_descent_test(robot, preview):
         print("[安全中止] 无有效D435i预览，拒绝无接触下降。")
         return False
     target = np.asarray(preview["target_surface_xyz_m"], dtype=np.float64)
+    grasp_point = np.asarray(preview["endpoint_xyz_m"], dtype=np.float64)
     pregrasp = np.asarray(preview["pregrasp_xyz_m"], dtype=np.float64)
-    stop_point = target.copy()
+    stop_point = grasp_point.copy()
     stop_point[2] += SAFE_DESCENT_CLEARANCE_M
+    if preview.get("plan"):
+        plan = preview["plan"]
+        print("[抓取几何] 手柄厚度=%.1fmm 手柄中段z=%.4f 夹爪偏移=%.1fmm 夹持TCP z=%.4f" % (
+            plan["handle_thickness_m"] * 1000.0, plan["handle_mid_z_m"],
+            plan["gripper_offset_m"] * 1000.0, plan["grasp_tcp_z_m"]))
     if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
         print("[安全中止] 无接触下降路径超出工作空间。")
         return False
@@ -1064,14 +1170,14 @@ def move_to_safe_descent_test(robot, preview):
             return False
 
         stop_pose = stop_point.tolist() + TOOL_ORIENTATION
-        print("[无接触下降] 低速停在目标上方 %.0fmm=%s" % (
+        print("[无接触下降] 低速停在夹持点上方 %.0fmm=%s" % (
             SAFE_DESCENT_CLEARANCE_M * 1000.0,
             ["%.4f" % value for value in stop_pose]))
         robot.moveL(stop_pose, speed=SAFE_DESCENT_SPEED,
                     acceleration=SAFE_DESCENT_ACCELERATION)
         if not verify_tool_orientation(robot, "无接触终点"):
             return False
-        print("[无接触下降完成] 已停在目标上方 %.0fmm；未接触工具、未控制夹爪。" %
+        print("[无接触下降完成] 已停在夹持点上方 %.0fmm；未接触工具、未控制夹爪。" %
               (SAFE_DESCENT_CLEARANCE_M * 1000.0))
         return True
     except Exception as exc:
@@ -1084,31 +1190,34 @@ def move_to_safe_descent_test(robot, preview):
         return False
 
 
-def execute_screwdriver_grasp(robot, target_xyz_m, support_plane_z_m, calibration):
+def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
+                              calibration):
     """Perform the guarded final stage after a verified no-contact descent.
 
-    The contact height comes from a one-time teach-pendant calibration.  It is
-    never inferred from a nominal gripper drawing or from the old cylinder code.
+    ``grasp_tcp_z`` is planned from the live handle thickness and the one-time
+    tool-independent gripper offset, so a different screwdriver needs no new
+    calibration.  The D no-contact endpoint must be SAFE_DESCENT_CLEARANCE_M
+    above this height; R descends the remaining distance and closes the gripper.
     """
     target = np.asarray(target_xyz_m, dtype=np.float64).reshape(3)
     final = target.copy()
-    final[2] += float(calibration["contact_offset_m"])
-    minimum_clearance = float(calibration["minimum_tcp_plane_clearance_m"])
-    if final[2] - float(support_plane_z_m) < minimum_clearance:
-        print("[安全中止] 预测TCP-纸箱净空 %.1fmm 小于标定最低净空 %.1fmm。" % (
-            (final[2] - float(support_plane_z_m)) * 1000.0,
-            minimum_clearance * 1000.0))
+    final[2] = float(grasp_tcp_z)
+    plane_clearance = final[2] - float(support_plane_z_m)
+    if plane_clearance < 0.003:
+        print("[安全中止] 夹持TCP离支撑面仅 %.1fmm，过低，拒绝执行。" % (plane_clearance * 1000.0))
         return False
-    retreat = target.copy()
+    retreat = final.copy()
     retreat[2] += SAFE_DESCENT_CLEARANCE_M
     if not (point_in_workspace(final) and point_in_workspace(retreat)):
         print("[安全中止] 螺丝刀夹持路径超出工作空间。")
         return False
-    if final[2] >= retreat[2]:
-        print("[安全中止] 标定夹持高度不低于无接触观察点，拒绝执行。")
-        return False
     try:
         current = _read_valid_tcp_pose(robot)
+        start_error_m = float(np.linalg.norm(current[:3] - retreat))
+        if start_error_m > SCREWDRIVER_R_START_TOL_M:
+            print("[安全中止] 当前TCP未停在D无接触终点（偏差 %.1fmm），拒绝执行R。" %
+                  (start_error_m * 1000.0))
+            return False
         if not verify_tool_orientation(robot, "螺丝刀夹持前"):
             return False
         high_align = current.copy()
@@ -1119,7 +1228,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, support_plane_z_m, calibratio
         print("[螺丝刀抓取] 在安全高度对准手柄中段。")
         robot.moveL(high_align.tolist(), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        print("[螺丝刀抓取] 低速下降到标定夹持高度=%s" %
+        print("[螺丝刀抓取] 低速下降到夹持高度=%s" %
               ["%.4f" % value for value in final])
         robot.moveL(final.tolist() + TOOL_ORIENTATION, speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
@@ -1139,12 +1248,13 @@ def execute_screwdriver_grasp(robot, target_xyz_m, support_plane_z_m, calibratio
         lift = final.copy()
         lift[2] += SCREWDRIVER_TEST_LIFT_M
         if not point_in_workspace(lift):
-            print("[安全中止] 20mm 测试抬升点超出工作空间；不抬升。")
+            print("[安全中止] %.0fmm 测试抬升点超出工作空间；不抬升。"
+                  % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
             return False
         robot.moveL(lift.tolist() + TOOL_ORIENTATION, speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        print("[螺丝刀抓取完成] reached=%s torque=%s；已低力夹持并仅抬升20mm。" %
-              (torque_reached, torque_current))
+        print("[螺丝刀抓取完成] reached=%s torque=%s；已低力夹持并抬升 %.0fmm，停在抬升位置。"
+              % (torque_reached, torque_current, SCREWDRIVER_TEST_LIFT_M * 1000.0))
         return True
     except Exception as exc:
         print("[安全中止] 螺丝刀抓取异常：%s" % exc)

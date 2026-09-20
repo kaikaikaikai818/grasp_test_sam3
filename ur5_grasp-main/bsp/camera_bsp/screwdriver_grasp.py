@@ -17,7 +17,8 @@ import numpy as np
 @dataclass(frozen=True)
 class HandleCandidate:
     center_px: tuple[int, int]
-    depth_m: float
+    depth_m: float            # robust handle-top depth (closest surface)
+    median_depth_m: float     # median depth, kept for diagnostics
     radius_px: float
     valid_depth_points: int
 
@@ -56,9 +57,16 @@ def find_screwdriver_handle(result: dict, depth_raw: np.ndarray, depth_scale: fl
     if int(valid.sum()) < 20:
         return None, "handle has insufficient valid depth"
     vy, vx = np.nonzero(valid)
+    depths = np.asarray(depth_m[valid], dtype=np.float64)
+    # The handle top is the surface closest to a downward-looking camera, so a
+    # low percentile is a robust estimate of the top rather than the median,
+    # which is dragged towards the sloping sides and the surrounding plane.
+    top_depth = float(np.percentile(depths, 10.0))
+    median_depth = float(np.median(depths))
     return HandleCandidate(
         center_px=(int(round(float(np.median(vx)))), int(round(float(np.median(vy))))),
-        depth_m=float(np.median(depth_m[valid])),
+        depth_m=top_depth,
+        median_depth_m=median_depth,
         radius_px=radius,
         valid_depth_points=int(valid.sum()),
     ), "thickest screwdriver handle region"
@@ -113,6 +121,49 @@ def fit_horizontal_support_plane(depth_raw: np.ndarray, depth_scale: float,
     return SupportPlane(z_m=z_m, spread_m=spread, inlier_count=int(inliers.size)), "support plane fitted"
 
 
+def estimate_handle_thickness(radius_px: float, depth_m: float,
+                              focal_px: float) -> tuple[Optional[float], str]:
+    """Estimate the handle diameter from its projected width and distance.
+
+    A cylinder's silhouette width equals its diameter regardless of viewing
+    angle, so ``diameter = 2 * radius_px * depth / focal``.  This avoids relying
+    on the depth of a dark, IR-absorbing handle surface, which reads as the
+    surrounding plane.  Returns ``(thickness_m, reason)``.
+    """
+    values = np.asarray([radius_px, depth_m, focal_px], dtype=np.float64)
+    if not np.all(np.isfinite(values)) or focal_px <= 0.0 or depth_m <= 0.0:
+        return None, "invalid radius, depth, or focal length"
+    diameter = 2.0 * float(radius_px) * float(depth_m) / float(focal_px)
+    return float(diameter), "handle diameter from projected width"
+
+
+def plan_grasp_tcp(handle_thickness_m: float, support_plane_z_m: float,
+                   gripper_offset_m: float):
+    """Grasp the handle at its mid height using a tool-independent gripper offset.
+
+    ``gripper_offset_m`` is the constant vertical distance from the grasp point
+    (handle mid) to the active TCP, measured once by the operator.  The handle
+    thickness is re-estimated every attempt, so a different screwdriver does not
+    need a new calibration.  Returns ``(tcp_z, plan)`` or ``(None, reason)``.
+    """
+    values = np.asarray([handle_thickness_m, support_plane_z_m, gripper_offset_m], dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        return None, "non-finite handle thickness, support plane, or gripper offset"
+    thickness = float(handle_thickness_m)
+    if thickness <= 0.010:
+        return None, "handle thickness is implausibly small"
+    if thickness > 0.100:
+        return None, "handle thickness is implausibly large"
+    handle_mid_z = float(support_plane_z_m) + thickness / 2.0
+    tcp_z = handle_mid_z + float(gripper_offset_m)
+    return tcp_z, {
+        "handle_thickness_m": thickness,
+        "handle_mid_z_m": handle_mid_z,
+        "gripper_offset_m": float(gripper_offset_m),
+        "grasp_tcp_z_m": tcp_z,
+    }
+
+
 def save_calibration(path: Path, calibration: dict) -> None:
     path.write_text(json.dumps(calibration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -122,7 +173,8 @@ def load_calibration(path: Path) -> Optional[dict]:
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     required = {"support_plane_z_m", "support_plane_spread_m", "contact_offset_m",
-                "minimum_tcp_plane_clearance_m", "handle_surface_above_plane_m"}
+                "minimum_tcp_plane_clearance_m", "handle_surface_above_plane_m",
+                "gripper_offset_m"}
     if not required.issubset(data):
         raise ValueError("grasp calibration missing required fields")
     return data
