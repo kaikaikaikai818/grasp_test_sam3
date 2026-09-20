@@ -1,17 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-文字指定工具抓取原型（手外粗定位 -> 手内精定位 -> 识别抓取，含夹爪）
+文字指定工具抓取（D455 全局粗定位 -> D435i 腕部精定位 -> 自适应夹持，含夹爪）
 
-全流程（按 g 触发）：
-  ① 粗定位  手外 D455 检测红色圆柱 -> pixel_to_robot_coords -> 基座坐标
-            -> TCP 垂直升到安全高度 -> 自动摆正并验证姿态 -> 粗移到目标上方
-  ② 精定位  手内 D435I 检测 -> pixel_to_base -> 细化基座坐标（多帧重试）
-            -> 精对齐到细化坐标上方；若多次失败则立即中止，禁止下降抓取
-  ③ 抓取   下降 -> 收爪 -> 抬起（只抓起+抬起，不含放置）
+一键抓取（按 a）：
+  ① D455 粗定位到目标上方（仅安全高度移动，不下降）
+  ② 等 D435i 稳定后自动无接触下降（D 终点 = 夹持点上方 40mm）
+  ③ 自动下降到夹持高度 -> 低力闭爪 -> 力矩确认 -> 抬升并停住
+  任一步超时或不通过都会停在安全位置，绝不盲降。
 
-按键：
-  g 执行① ② ③     t 仅升高并摆正     o 夹爪张开     c 夹爪闭合     q 退出
+手动按键：
+  a 一键抓取（D455 粗定位 + 自动下降/夹持）
+  p 仅双相机观察点   d 无接触下降   r 夹持并抬升
+  t 仅升高并摆正     o 夹爪张开     c 夹爪闭合     q 退出
 自检：
   --check-calib  启动时读两台相机实时内参，与标定内参比对，超阈值拒绝执行
   --gripper-test 交互式校定夹爪开/合 position
@@ -118,15 +119,12 @@ D435I_VERIFIED_WARNING_TOL = 3.0
 TOOL_ORIENTATION = [3.141, 0.0, 0.0]   # 固定朝下 (RX, RY, RZ)
 ORIENTATION_SAFE_Z = 0.20     # 姿态归正前TCP至少升到此高度(m)
 ORIENTATION_TOL_DEG = 2.0     # 实际姿态与标准姿态的最大允许误差(度)
-LIFT_ABOVE = 0.05             # 目标正上方 50mm
-CYL_H = 0.03                  # 圆柱高(m)，用于下探深度下界（避免穿底）
-GRASP_DEPTH_OFFSET = 0.025    # 低于顶面 z 的下探深度（让手指跨住圆柱中下部）
-LIFT_Z_OFFSET = 0.15          # 抓起后抬起高度
 HO_Z_OFFSET = 0.026           # 手外 D455 高度基准补偿（标定 z 整体偏低 0.026m）
 HI_Z_OFFSET = 0.0             # 手内 z 补偿（若顶面 z 偏低可微调）
 
-# 精定位：多次采样取有效值；若连续 REFINE_RETRY_N 次都失败则立即中止抓取
-REFINE_RETRY_N = 5
+# 一键抓取：a 粗定位后自动完成下降与夹持；等待相机稳定的超时(秒)
+ENABLE_ONE_KEY_GRASP = True
+AUTO_GRASP_TIMEOUT_S = 8.0
 
 # 夹爪
 GRIP_PORT = "COM10"
@@ -139,7 +137,6 @@ GRIP_OPEN_FORCE = 40
 GRIP_TORQUE_MIN = 80          # 实时力矩(0x060C)阈值: 低于此且力矩未到达即判空抓
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
-GRASP_HOME = [-0.4, -0.025, 0.14981] + TOOL_ORIENTATION
 
 
 def main():
@@ -220,6 +217,8 @@ def main():
     coarse_ready_streak = 0
     coarse_destination = None
     coarse_reason = None
+    auto_grasp_state = "idle"
+    auto_grasp_deadline = 0.0
     d455_detection_frozen = False
     observation_active = False
     descent_ready_streak = 0
@@ -244,6 +243,8 @@ def main():
     if TEXT_PROMPT.strip().lower() == "a screwdriver":
         if screwdriver_calibration is None:
             print("  [螺丝刀抓取锁定] 尚未完成深度标定：运行 calibrate_screwdriver_grasp.py plane/contact。")
+            if screwdriver_calibration_error:
+                print("      标定文件读取失败：%s" % screwdriver_calibration_error)
         else:
             print("  [螺丝刀标定] 已加载：支撑面 z=%.4fm。R 键仍需 ENABLE_SCREWDRIVER_GRASP=True。" %
                   screwdriver_calibration["support_plane_z_m"])
@@ -254,13 +255,15 @@ def main():
               % (SAFE_APPROACH_CONFIRM_FRAMES,
                  SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0))
         print("  a -> D455单相机粗定位：腕部相机看不到工具时，仅用D455对齐坐标移动到目标上方。")
+        if ENABLE_ONE_KEY_GRASP:
+            print("       随后自动完成无接触下降与夹持（一键抓取，超时 %.0f 秒即停在安全位置）。"
+                  % AUTO_GRASP_TIMEOUT_S)
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
     print("  R -> 螺丝刀低力夹持并抬升 %.0fmm（需完成 plane/contact 标定，默认锁定）"
           % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
-    print("  g -> 一键抓取：安全升高并摆正 -> 手外粗定位 -> 手内精定位 -> 下降收爪 -> 抬起")
-    print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近圆柱或抓取")
+    print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近工具或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
     print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
     print("  本次测量文件:", validation_log)
@@ -402,6 +405,41 @@ def main():
                 descent_ready_streak += 1
             else:
                 descent_ready_streak = 0
+
+            # 一键抓取：a 粗定位后自动推进 D 与 R，任一步超时/失败即停在安全位置。
+            if auto_grasp_state == "wait_descent":
+                if time.time() > auto_grasp_deadline:
+                    print("[一键抓取] 超时：D435i 未稳定，停在观察点，不下降。")
+                    auto_grasp_state = "idle"
+                elif (descent_ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES
+                      and grasp_preview.get("ready")):
+                    locked = attempt_descent(robot, grasp_preview, current_support_plane)
+                    if locked is None:
+                        print("[一键抓取] 下降未通过安全门，停在观察点。")
+                        auto_grasp_state = "idle"
+                    else:
+                        locked_grasp_preview = dict(grasp_preview)
+                        locked_screwdriver_handle = locked
+                        safe_descent_completed = True
+                        auto_grasp_state = "wait_grasp"
+                        auto_grasp_deadline = time.time() + AUTO_GRASP_TIMEOUT_S
+                        print("[一键抓取] 已到达无接触终点，等待夹持条件。")
+            elif auto_grasp_state == "wait_grasp":
+                if time.time() > auto_grasp_deadline:
+                    print("[一键抓取] 超时：夹持条件未满足，停在下降终点。")
+                    auto_grasp_state = "idle"
+                else:
+                    status, message = attempt_grasp(
+                        robot, locked_screwdriver_handle, hi_gate, hi_handle,
+                        current_support_plane, screwdriver_calibration, state["hi_base"])
+                    if status == "done":
+                        print("[一键抓取] 完成。按 o 可松开。")
+                        auto_grasp_state = "idle"
+                    elif status == "failed":
+                        print("[一键抓取] " + (message or "夹持失败"))
+                        auto_grasp_state = "idle"
+                    # status == "waiting"：条件未满足，继续等待（直到超时）
+
             if observation_active:
                 association_text = grasp_preview_status_text(
                     grasp_preview, ENABLE_SAFE_DESCENT_TEST, descent_ready_streak,
@@ -494,7 +532,12 @@ def main():
                         d455_detection_frozen = True
                         observation_active = True
                         ho_filter.reset()
-                        print("[D455粗定位完成] 已停在目标上方；请等 D435i 稳定后按 D。")
+                        if ENABLE_ONE_KEY_GRASP:
+                            auto_grasp_state = "wait_descent"
+                            auto_grasp_deadline = time.time() + AUTO_GRASP_TIMEOUT_S
+                            print("[一键抓取] 已进入自动模式：等 D435i 稳定后自动下降并夹持。")
+                        else:
+                            print("[D455粗定位完成] 已停在目标上方；请等 D435i 稳定后按 D。")
             elif key == ord('p'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -523,17 +566,10 @@ def main():
                     print("[安全锁定] D435i 稳定帧不足：%d/%d。" %
                           (descent_ready_streak, SAFE_DESCENT_CONFIRM_FRAMES))
                 else:
-                    if move_to_safe_descent_test(robot, grasp_preview):
+                    locked = attempt_descent(robot, grasp_preview, current_support_plane)
+                    if locked is not None:
                         locked_grasp_preview = dict(grasp_preview)
-                        if TEXT_PROMPT.strip().lower() == "a screwdriver":
-                            locked_screwdriver_handle = {
-                                "target_base_xyz_m": list(grasp_preview["target_surface_xyz_m"]),
-                                "support_plane_z_m": (current_support_plane.z_m
-                                                       if current_support_plane is not None else None),
-                            }
-                            if grasp_preview.get("adaptive"):
-                                locked_screwdriver_handle["grasp_tcp_z_m"] = float(
-                                    grasp_preview["endpoint_xyz_m"][2])
+                        locked_screwdriver_handle = locked
                         safe_descent_completed = True
                         print("[无接触下降] 已锁定D键触发时的目标中心；后续画面不再跟随分割中心漂移。")
             elif key == ord('r'):
@@ -550,20 +586,11 @@ def main():
                 elif not (hi_gate["passed"] and hi_handle is not None and current_support_plane is not None):
                     print("[安全锁定] 等待稳定手柄区域和当前支撑面。")
                 else:
-                    current_target = np.asarray(state["hi_base"], dtype=np.float64)
-                    locked_target = np.asarray(locked_screwdriver_handle["target_base_xyz_m"], dtype=np.float64)
-                    target_shift = float(np.linalg.norm(current_target - locked_target))
-                    if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
-                        print("[安全锁定] 手柄目标在 D 后移动 %.1fmm；请重新运行 P → D。" %
-                              (target_shift * 1000.0))
-                    else:
-                        execute_screwdriver_grasp(
-                            robot, locked_target,
-                            float(locked_screwdriver_handle["grasp_tcp_z_m"]),
-                            current_support_plane.z_m,
-                            screwdriver_calibration)
-            elif key == ord('g'):
-                print("[安全锁定] 旧圆柱 g 流程不用于螺丝刀。螺丝刀请在标定后使用 R。")
+                    status, message = attempt_grasp(
+                        robot, locked_screwdriver_handle, hi_gate, hi_handle,
+                        current_support_plane, screwdriver_calibration, state["hi_base"])
+                    if message:
+                        print("[安全锁定] " + message)
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
@@ -1266,104 +1293,45 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
         return False
 
 
-def do_grasp(robot, detector, state):
-    """一键全流程：① 粗定位 -> ② 精定位 -> ③ 下降收爪抬起；精定位失败则安全中止。"""
-    coarse = state["ho_base"] or state["hi_base"]
-    if coarse is None:
-        print("[提示] 未检测到目标工具，无法抓取")
-        return
+def attempt_descent(robot, grasp_preview, current_support_plane):
+    """Run one guarded no-contact descent and return the locked handle, or None.
 
-    x, y, z = coarse
-    # ③ 工作空间钳制：x/y 同样限制，防止目标点在可达范围外
-    clamp = lambda v, lim: max(lim[0], min(v, lim[1]))
-    x = clamp(x, WORKSPACE_LIMITS[0])
-    y = clamp(y, WORKSPACE_LIMITS[1])
-    z = clamp(z, WORKSPACE_LIMITS[2])
-    try:
-        # ① 粗定位：手外基座坐标 -> 移到目标上方
-        print("[①粗定位] 手外 base = [%.3f, %.3f, %.3f]" % (x, y, z))
-        robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-        if not normalize_tool_pose(robot):
-            print("[安全中止] 姿态归正未通过，本次抓取结束；夹爪保持打开")
-            return
-        above = [x, y, z + LIFT_ABOVE] + TOOL_ORIENTATION
-        print("[移动] 粗定位上方 moveL %s" % (["%.3f" % v for v in above],))
-        robot.moveL(above, speed=0.05, acceleration=0.05)
-        if not verify_tool_orientation(robot, "粗定位上方"):
-            print("[安全中止] 到达粗定位上方后姿态异常，不执行手内精定位或下降")
-            return
-        time.sleep(1)
-
-        # ② 精定位：手内多帧重试；失败则立即中止，禁止使用粗定位坐标下降
-        refined = refine_locate(robot, detector, REFINE_RETRY_N)
-        if refined is not None:
-            x, y, z = refined
-            x = clamp(x, WORKSPACE_LIMITS[0])
-            y = clamp(y, WORKSPACE_LIMITS[1])
-            z = clamp(z, WORKSPACE_LIMITS[2])
-            print("[②精定位] 手内 base = [%.3f, %.3f, %.3f]" % (x, y, z))
-        else:
-            print("[安全中止] 手内精定位连续 %d 次失败，禁止使用粗定位坐标下降抓取" % REFINE_RETRY_N)
-            print("[安全中止] 机械臂保持在粗定位上方，夹爪保持打开；请检查目标和手内相机后重新按 g")
-            return
-
-        # ③ 精对齐 -> 下降 -> 收爪 -> 抬起
-        above = [x, y, z + LIFT_ABOVE] + TOOL_ORIENTATION
-        print("[移动] 精定位上方 moveL %s" % (["%.3f" % v for v in above],))
-        robot.moveL(above, speed=0.05, acceleration=0.05)
-
-        clamp = lambda v, lim: max(lim[0], min(v, lim[1]))
-        z_low = clamp(z - GRASP_DEPTH_OFFSET, WORKSPACE_LIMITS[2])
-        floor_z = z - CYL_H               # 圆柱底面的 z，下探不得低于此
-        if z_low < floor_z:
-            print("[安全] 下探 z=%.3f 低于圆柱底面 z=%.3f，抬至底面高度" % (z_low, floor_z))
-            z_low = floor_z
-        grasp_pt = [x, y, z_low] + TOOL_ORIENTATION
-        print("[移动] 下降抓取 moveL %s" % (["%.3f" % v for v in grasp_pt],))
-        robot.moveL(grasp_pt, speed=0.05, acceleration=0.05)
-
-        print("[夹爪] 收爪抓取 pos=%d" % GRIP_CLOSE_POS)
-        robot.grip(GRIP_CLOSE_POS, GRIP_SPEED, GRIP_FORCE)
-        torq_reached = robot.read_torque_reached()
-        torq_cur = robot.read_torque_current()
-        print("[夹爪] 力矩到达=%d  实时力矩=%d" % (torq_reached, torq_cur))
-        if not (torq_reached == 1 or torq_cur >= GRIP_TORQUE_MIN):
-            print("[抓取失败] 力矩未到达且实时力矩过低(疑似空抓)，松开并中止，不抬升")
-            robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-            return
-        time.sleep(1)
-
-        lift = [x, y, z + LIFT_Z_OFFSET] + TOOL_ORIENTATION
-        print("[移动] 抬起 moveL %s" % (["%.3f" % v for v in lift],))
-        robot.moveL(lift, speed=0.05, acceleration=0.05)
-
-        print("抓取完成（已抓起并抬起，未放置）。按 o 张开可放下，q 退出。")
-    except Exception as e:
-        print("[异常] 抓取流程出错：%s" % e)
-        safe_return(robot)
+    Shared by the manual D key and the one-key auto grasp so both use the same
+    safety checks.
+    """
+    if not move_to_safe_descent_test(robot, grasp_preview):
+        return None
+    locked = {
+        "target_base_xyz_m": list(grasp_preview["target_surface_xyz_m"]),
+        "support_plane_z_m": (current_support_plane.z_m
+                              if current_support_plane is not None else None),
+    }
+    if grasp_preview.get("adaptive"):
+        locked["grasp_tcp_z_m"] = float(grasp_preview["endpoint_xyz_m"][2])
+    return locked
 
 
-def refine_locate(robot, detector, n_repeat):
-    """手内精定位，重复 n_repeat 次取第一个有效值；全失败返回 None。"""
-    for i in range(n_repeat):
-        hi_color, hi_depth = robot.get_camera_data()
-        if hi_color is not None:
-            res = detector.detect(hi_color, hi_depth, robot.camera.scale)
-            if res is not None and res["z_mm"] is not None:
-                base_mm, base_m = robot.pixel_to_base(*res["center"], res["z_mm"])
-                return (float(base_m[0]), float(base_m[1]),
-                        float(base_m[2]) + HI_Z_OFFSET)
-        time.sleep(0.3)
-    return None
+def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plane,
+                  calibration, current_target):
+    """Run the guarded final grasp.
 
-
-def safe_return(robot):
-    """异常时回 home 并张开爪。"""
-    try:
-        robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-        robot.moveL(GRASP_HOME, speed=0.05, acceleration=0.05)
-    except Exception as e:
-        print("[提示] 复位失败，请手动检查机器人：%s" % e)
+    Returns ``(status, message)`` where status is ``"waiting"`` (not ready yet),
+    ``"done"`` or ``"failed"``.  Shared by the manual R key and the one-key grasp.
+    """
+    if not (hi_gate["passed"] and hi_handle is not None
+            and current_support_plane is not None):
+        return "waiting", "等待稳定手柄区域和当前支撑面。"
+    if locked_handle is None or "grasp_tcp_z_m" not in locked_handle:
+        return "failed", "未记录自适应夹持高度；请重新运行下降。"
+    locked_target = np.asarray(locked_handle["target_base_xyz_m"], dtype=np.float64)
+    target_shift = float(np.linalg.norm(
+        np.asarray(current_target, dtype=np.float64) - locked_target))
+    if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
+        return "failed", "手柄目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
+    ok = execute_screwdriver_grasp(
+        robot, locked_target, float(locked_handle["grasp_tcp_z_m"]),
+        current_support_plane.z_m, calibration)
+    return ("done", None) if ok else ("failed", "夹持未完成（力矩或姿态未通过）。")
 
 
 def parse_args():

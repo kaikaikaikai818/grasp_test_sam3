@@ -1,24 +1,28 @@
 # 本地文字工具抓取入口
 
-新增的 `grasp_tool.py` 不修改原来的 `grasp_cylinder.py`。它使用上一级
-MobileSAM 项目的 CLIPSeg + MobileSAM，根据代码顶部的文字寻找工具。
+`grasp_tool.py` 使用上一级 MobileSAM 项目的 CLIPSeg + MobileSAM，根据代码顶部的
+文字寻找工具，并完成 D455 全局粗定位 -> D435i 腕部精定位 -> 自适应夹持。
 
 ```python
-TEXT_PROMPT = "a wrench"
+TEXT_PROMPT = "a screwdriver"
 ENABLE_ROBOT_GRASP = False
 ```
 
 第一次接真机时保持 `ENABLE_ROBOT_GRASP = False`，只检查两个窗口中的 mask、
-深度和坐标。此时程序不会建立 UR5 控制连接，也不会初始化夹爪；D455 显示
-基座坐标，D435i 显示相机坐标。确认两台相机定位都正确后，再配置具体工具的
-夹持高度、方向和夹爪参数，最后才允许机械臂抓取。
+深度和坐标。确认两台相机定位都正确后，再配置具体工具的夹持参数，最后才允许
+机械臂抓取。
 
-- 原红色圆柱入口：`grasp_cylinder.py`
-- 文字工具入口：`grasp_tool.py`
+## 一键抓取
+
+`ENABLE_ONE_KEY_GRASP = True` 时，按 `a` 用 D455 对齐坐标粗定位到目标上方，
+随后自动完成无接触下降与夹持：等 D435i 连续稳定后下降到“夹持点上方 40mm”，
+再下降到夹持高度、低力闭爪、读力矩确认、抬升 `SCREWDRIVER_TEST_LIFT_M` 后停住。
+任一步超时（`AUTO_GRASP_TIMEOUT_S`）或未通过安全门都会停在安全位置，不会盲降。
+完成后按 `o` 松开、`c` 再闭合。手动仍可用 `P` / `D` / `R` 分步执行。
 
 ## 双相机稳定定位
 
-`grasp_tool.py` 中的 `D455_ROI = (130, 80, 530, 420)` 是 D455 工作台裁剪范围，
+`grasp_tool.py` 中的 `D455_ROI = (170, 95, 500, 370)` 是 D455 工作台裁剪范围，
 格式为 `(左, 上, 右, 下)`。D455 会放大该区域识别远处小工具。画面状态含义：
 
 - `SEARCHING`：没有连续有效目标；
