@@ -31,7 +31,7 @@ class FakeRobot:
 class PlacementTests(unittest.TestCase):
     def test_orientation_return_lifts_before_turning(self):
         current = [-.3, -.6, .08, 2.0, .1, .2]
-        lift, turn = plan_safe_orientation_return(current, [3.141, 0, 0], .14, LIMITS)
+        lift, turn = plan_safe_orientation_return(current, [3.141, 0, 0], .09, LIMITS)
         self.assertEqual(lift[:2], current[:2])
         self.assertEqual(turn[:3], lift[:3])
         self.assertEqual(lift[3:], current[3:])
