@@ -69,7 +69,7 @@ def find_screwdriver_handle(result: dict, depth_raw: np.ndarray, depth_scale: fl
         median_depth_m=median_depth,
         radius_px=radius,
         valid_depth_points=int(valid.sum()),
-    ), "thickest screwdriver handle region"
+    ), None
 
 
 def result_at_handle(result: dict, handle: HandleCandidate) -> dict:

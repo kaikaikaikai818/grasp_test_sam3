@@ -35,6 +35,7 @@ class ScrewdriverGeometryTests(unittest.TestCase):
         depth = np.full(mask.shape, 500, dtype=np.uint16)
         handle, reason = find_screwdriver_handle({"mask": mask.astype(bool)}, depth, 0.001)
         self.assertIsNotNone(handle, reason)
+        self.assertIsNone(reason)
         self.assertGreater(handle.center_px[0], 110)
 
     def test_narrow_mask_is_rejected(self):
