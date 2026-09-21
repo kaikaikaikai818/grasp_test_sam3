@@ -269,6 +269,7 @@ def main():
     locked_screwdriver_handle = None
     safe_descent_completed = False
     grasp_completed = False
+    orientation_return_completed = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -308,7 +309,8 @@ def main():
     print("  R -> 已审核工具低力夹持并抬升 %.0fmm（需对应工具标定）"
           % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
     print("  t -> 抓取成功后：垂直抬到安全搬运高度，再恢复初始标准角度")
-    print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
+    print("  o -> 抓取后松开，再抬升10mm并自动恢复初始角度")
+    print("  c -> 夹爪闭合     q -> 退出")
     print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
     print("  本次测量文件:", validation_log)
 
@@ -537,6 +539,7 @@ def main():
                         grip_profile=profile)
                     if status == "done":
                         grasp_completed = True
+                        orientation_return_completed = False
                         if placement is not None:
                             try:
                                 place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
@@ -622,10 +625,15 @@ def main():
                       % active_position)
             elif key == ord('o'):
                 if gripper_enabled:
+                    released_completed_grasp = grasp_completed
                     open_position = profile["open_position"] if profile else GRIP_OPEN_POS
                     robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
                     grasp_completed = False
                     print("[夹爪] 张开 pos=%d" % open_position)
+                    if released_completed_grasp and not orientation_return_completed:
+                        print("[自动收尾] 已松开工具；再抬升10mm并恢复初始标准角度。")
+                        orientation_return_completed = normalize_tool_pose(
+                            robot, carrying_tool=True)
                 else:
                     print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('c'):
@@ -642,7 +650,8 @@ def main():
                     print("[安全锁定] 尚未确认抓取成功，拒绝执行持物旋转。")
                 else:
                     print("[持物姿态恢复] 先垂直抬到安全搬运高度，再恢复初始标准角度。")
-                    normalize_tool_pose(robot, carrying_tool=True)
+                    orientation_return_completed = normalize_tool_pose(
+                        robot, carrying_tool=True)
             elif key == ord('a'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -729,6 +738,7 @@ def main():
                         print("[安全锁定] " + message)
                     if status == "done":
                         grasp_completed = True
+                        orientation_return_completed = False
                     if status == "done" and placement is not None:
                         try:
                             place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
