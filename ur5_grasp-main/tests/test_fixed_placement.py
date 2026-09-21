@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bsp.robot_bsp.fixed_placement import load_placement, place_at_fixed_point
+from bsp.robot_bsp.fixed_placement import (load_placement, place_at_fixed_point,
+                                           plan_safe_orientation_return)
 
 
 LIMITS = [[-0.5, 0.05], [-0.8, -0.45], [-0.2, 0.6]]
@@ -28,6 +29,14 @@ class FakeRobot:
 
 
 class PlacementTests(unittest.TestCase):
+    def test_orientation_return_lifts_before_turning(self):
+        current = [-.3, -.6, .08, 2.0, .1, .2]
+        lift, turn = plan_safe_orientation_return(current, [3.141, 0, 0], .14, LIMITS)
+        self.assertEqual(lift[:2], current[:2])
+        self.assertEqual(turn[:3], lift[:3])
+        self.assertEqual(lift[3:], current[3:])
+        self.assertEqual(turn[3:], [3.141, 0, 0])
+
     def test_unapproved_or_unset_destination_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "place.json"

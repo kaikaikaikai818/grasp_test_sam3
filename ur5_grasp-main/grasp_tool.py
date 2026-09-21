@@ -34,7 +34,8 @@ import numpy as np
 
 from bsp.robot_bsp.UR_Robot import UR_Robot, load_camera_ini
 from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
-from bsp.robot_bsp.fixed_placement import load_placement, place_at_fixed_point
+from bsp.robot_bsp.fixed_placement import (load_placement, place_at_fixed_point,
+                                           plan_safe_orientation_return)
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
@@ -135,6 +136,7 @@ ENABLE_ONE_KEY_GRASP = True
 AUTO_GRASP_TIMEOUT_S = 8.0
 ANGLE_GRASP_TIMEOUT_S = 15.0
 ANGLE_STABLE_DEG = 5.0
+POST_GRASP_RETURN_LIFT_M = 0.060
 
 # 夹爪
 GRIP_PORT = "COM10"
@@ -266,6 +268,7 @@ def main():
     locked_grasp_preview = None
     locked_screwdriver_handle = None
     safe_descent_completed = False
+    grasp_completed = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -304,7 +307,7 @@ def main():
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
     print("  R -> 已审核工具低力夹持并抬升 %.0fmm（需对应工具标定）"
           % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
-    print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近工具或抓取")
+    print("  t -> 抓取成功后：垂直抬到安全搬运高度，再恢复初始标准角度")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
     print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
     print("  本次测量文件:", validation_log)
@@ -533,6 +536,7 @@ def main():
                         current_support_plane, screwdriver_calibration, state["hi_base"],
                         grip_profile=profile)
                     if status == "done":
+                        grasp_completed = True
                         if placement is not None:
                             try:
                                 place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
@@ -540,6 +544,7 @@ def main():
                                                      GRIP_OPEN_SPEED,
                                                      GRIP_OPEN_FORCE)
                                 print("[一键抓取] 已在固定位置放下工具。")
+                                grasp_completed = False
                             except Exception as exc:
                                 print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
                         else:
@@ -619,6 +624,7 @@ def main():
                 if gripper_enabled:
                     open_position = profile["open_position"] if profile else GRIP_OPEN_POS
                     robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+                    grasp_completed = False
                     print("[夹爪] 张开 pos=%d" % open_position)
                 else:
                     print("[安全锁定] 夹爪未启用，无法控制。")
@@ -630,11 +636,13 @@ def main():
                 else:
                     print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('t'):
-                if ENABLE_ROBOT_GRASP:
-                    print("[姿态测试] 仅执行安全升高和末端摆正，不执行抓取")
-                    normalize_tool_pose(robot)
+                if args.stage not in ("grasp", "place"):
+                    print("[安全锁定] t 只在 --stage grasp/place 中允许执行。")
+                elif not grasp_completed:
+                    print("[安全锁定] 尚未确认抓取成功，拒绝执行持物旋转。")
                 else:
-                    print("[安全锁定] 纯视觉模式不发送机械臂运动命令。")
+                    print("[持物姿态恢复] 先垂直抬到安全搬运高度，再恢复初始标准角度。")
+                    normalize_tool_pose(robot, carrying_tool=True)
             elif key == ord('a'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -719,6 +727,8 @@ def main():
                         grip_profile=profile)
                     if message:
                         print("[安全锁定] " + message)
+                    if status == "done":
+                        grasp_completed = True
                     if status == "done" and placement is not None:
                         try:
                             place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
@@ -726,6 +736,7 @@ def main():
                                                  GRIP_OPEN_SPEED,
                                                  GRIP_OPEN_FORCE)
                             print("[固定放置] 完成。")
+                            grasp_completed = False
                         except Exception as exc:
                             print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
             elif key == ord('y'):
@@ -1233,14 +1244,17 @@ def rotate_to_planar_orientation(robot, orientation):
         return False
 
 
-def normalize_tool_pose(robot):
-    """先垂直升到安全高度，再原地摆正末端；失败时停止后续流程。"""
+def normalize_tool_pose(robot, carrying_tool=False):
+    """Lift vertically, then restore the configured standard orientation."""
     try:
         current = _read_valid_tcp_pose(robot)
         print("[姿态归正] 当前TCP=%s" % (["%.4f" % v for v in current],))
 
-        lift_target = current.copy()
-        lift_target[2] = max(float(current[2]), ORIENTATION_SAFE_Z)
+        safe_z = (float(current[2]) + POST_GRASP_RETURN_LIFT_M
+                  if carrying_tool else ORIENTATION_SAFE_Z)
+        lift_pose, straighten_pose = plan_safe_orientation_return(
+            current, TOOL_ORIENTATION, safe_z, WORKSPACE_LIMITS)
+        lift_target = np.asarray(lift_pose, dtype=np.float64)
         print("[姿态归正] 安全抬升目标=%s" %
               (["%.4f" % v for v in lift_target],))
         if lift_target[2] > current[2] + 0.001:
@@ -1249,15 +1263,18 @@ def normalize_tool_pose(robot):
             print("[姿态归正] 当前TCP已不低于安全高度，无需向下或重复抬升")
 
         after_lift = _read_valid_tcp_pose(robot)
-        straighten_target = after_lift.copy()
-        straighten_target[3:6] = TOOL_ORIENTATION
+        # Rebuild from the measured post-lift pose so rotation remains exactly
+        # in place even if the lift ended with a small position deviation.
+        _, straighten_pose = plan_safe_orientation_return(
+            after_lift, TOOL_ORIENTATION, safe_z, WORKSPACE_LIMITS)
+        straighten_target = np.asarray(straighten_pose, dtype=np.float64)
         print("[姿态归正] 标准姿态目标=%s" %
               (["%.4f" % v for v in straighten_target],))
         robot.moveL(straighten_target.tolist(), speed=0.05, acceleration=0.05)
 
         if not verify_tool_orientation(robot, "摆正后"):
             return False
-        print("[姿态归正] 完成，可以继续执行粗定位")
+        print("[姿态归正] 完成，已保持当前XY并恢复标准角度")
         return True
     except Exception as exc:
         print("[安全中止] 姿态归正失败：%s" % exc)

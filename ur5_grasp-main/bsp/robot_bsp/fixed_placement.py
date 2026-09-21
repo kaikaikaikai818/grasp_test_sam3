@@ -11,6 +11,25 @@ from pathlib import Path
 import numpy as np
 
 
+def plan_safe_orientation_return(current_pose, target_orientation, safe_z, workspace_limits):
+    """Create vertical-lift and in-place-turn poses without lowering the TCP."""
+    current = np.asarray(current_pose, dtype=float).reshape(-1)
+    orientation = np.asarray(target_orientation, dtype=float).reshape(-1)
+    if current.size != 6 or orientation.size != 3 or not np.all(np.isfinite(current)) \
+            or not np.all(np.isfinite(orientation)):
+        raise ValueError("invalid current or target orientation")
+    limits = np.asarray(workspace_limits, dtype=float)
+    lift_z = max(float(current[2]), float(safe_z))
+    if any(not (limits[i, 0] <= value <= limits[i, 1])
+           for i, value in enumerate((current[0], current[1], lift_z))):
+        raise ValueError("orientation return pose outside workspace")
+    lift = current.copy()
+    lift[2] = lift_z
+    turn = lift.copy()
+    turn[3:6] = orientation
+    return lift.tolist(), turn.tolist()
+
+
 def load_placement(path: Path, workspace_limits):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if data.get("approved_for_this_cell") is not True:
