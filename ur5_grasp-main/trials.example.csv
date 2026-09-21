@@ -1,0 +1,2 @@
+trial_id,tool,prompt,scene,correct_target,grasped,moved,placed,stable_after_release,failure_reason,notes
+1,screwdriver,a screwdriver,two tools visible,,,,,,

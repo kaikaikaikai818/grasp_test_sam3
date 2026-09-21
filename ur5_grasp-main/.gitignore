@@ -3,5 +3,7 @@ __pycache__/
 .idea/
 .vscode/
 grasp_surface_calibration.json
+fixed_placement.json
+tool_profiles.json
 .venv/
 venv/

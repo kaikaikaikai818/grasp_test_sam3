@@ -1,5 +1,26 @@
 # 本地文字工具抓取入口
 
+## 2026 秋季阶段目标与当前可用范围
+
+阶段验收与国庆假期后的安排见 `PROJECT_ROADMAP_5_WEEKS.md`，最终日期为 2026-11-06。英文名称可在启动时传入，例如 `--prompt "screwdriver"`、`--prompt "adjustable wrench"`、`--prompt "tape measure"`、`--prompt "tape dispenser"` 或 `--prompt "rubber mallet"`；未配置过的英文名称也可以用于视觉识别。多工具同场时，模型按指定名称选择目标，但正确率仍须实测。
+
+程序默认 `--stage vision`，不连接机械臂控制或夹爪。按以下顺序逐级验证，每次只开放本级能力：
+
+1. `vision`：双相机识别与坐标显示，不发送运动命令；可加 `--show-angle`。
+2. `observe`：只允许按 `a` 或 `p` 移动到高位观察点，不旋转、不下降、不启用夹爪。
+3. `rotate`：到观察点后按 `y` 在安全高度对齐工具方向；不能下降。
+4. `descent`：按 `a`、`y`，重新稳定后按 `d`，停在夹持点上方 40 mm；不启用夹爪。
+5. `grasp`：在完成前面检查后按 `r` 夹取并抬升。只有显式加 `--auto` 时，按 `a` 才会自动推进。
+6. `place`：抓取成功后使用经过审核的固定位置放下；同样可选 `--auto`。
+
+当前已验证的抓取基线仍是螺丝刀。其他四类先只输出**视觉候选点**；进入 `rotate` 及后续阶段前，必须实机测量夹持高度、夹爪位置与力度，将 `tool_profiles.example.json` 复制为本机 `tool_profiles.json` 并审核启用。
+
+现有 CLIPSeg + MobileSAM 是默认视觉方案。可选 YOLOE 使用 `--backend yoloe --checkpoint <本地模型文件>`；需另行安装 `requirements-yoloe.txt`，预先下载动态文本编码器及权重。运行时更换英文名称需要保留原始可提示模型；类别固化的导出文件不能满足这一要求。用 `scripts/evaluate_tool_vision.py --help` 查看离线对比工具，它只读取图片并保存预测与覆盖图，不连接机器人。
+
+`rotate` 及后续阶段会在安全观察高度计算并旋转夹爪，清除旧的腕部相机观测，重新定位后才允许下降。手动分步时按 `y` 执行高位旋转，再等待重新稳定后按 `d`。这个新路径通过了离线几何测试，仍需先在真机上验证高位旋转与无接触下降。
+
+固定位置放置须先用示教器测得坐标，将 `fixed_placement.example.json` 复制为 `fixed_placement.json`，填写每个值并在本机审核后设置 `approved_for_this_cell=true`。只有 `--stage place` 会使用该位置。**示例文件中的空值不能用于运动。** 每次完整试验可填入 `trials.example.csv` 格式的记录，再用 `scripts/summarize_grasp_trials.py` 按工具计算首抓完整成功率。
+
 `grasp_tool.py` 使用上一级 MobileSAM 项目的 CLIPSeg + MobileSAM，根据代码顶部的
 文字寻找工具，并完成 D455 全局粗定位 -> D435i 腕部精定位 -> 自适应夹持。
 
@@ -8,9 +29,8 @@ TEXT_PROMPT = "a screwdriver"
 ENABLE_ROBOT_GRASP = False
 ```
 
-第一次接真机时保持 `ENABLE_ROBOT_GRASP = False`，只检查两个窗口中的 mask、
-深度和坐标。确认两台相机定位都正确后，再配置具体工具的夹持参数，最后才允许
-机械臂抓取。
+第一次接真机时使用默认的 `--stage vision`，只检查两个窗口中的 mask、深度和坐标。
+不要通过修改源码中的历史常量切换阶段，统一使用 `--stage`。
 
 ## 一键抓取
 
@@ -29,7 +49,7 @@ ENABLE_ROBOT_GRASP = False
 - `TRACKING`：已经发现目标，但中心或深度仍不稳定；
 - `STABLE`：连续多帧稳定，才会发布坐标。
 
-纯视觉测试继续保持 `ENABLE_ROBOT_GRASP = False`。退出时程序会主动释放两台相机。
+纯视觉测试使用 `--stage vision`。退出时程序会主动释放两台相机。
 
 ## 坐标验收与安全门控
 

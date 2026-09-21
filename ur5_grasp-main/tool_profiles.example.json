@@ -1,0 +1,8 @@
+{
+  "tools": {
+    "adjustable wrench": {"approved_for_this_cell": false, "grasp_tcp_z_m": null, "open_position": null, "close_position": null, "grip_force": null, "requires_angle": true},
+    "tape measure": {"approved_for_this_cell": false, "grasp_tcp_z_m": null, "open_position": null, "close_position": null, "grip_force": null, "requires_angle": false},
+    "tape dispenser": {"approved_for_this_cell": false, "grasp_tcp_z_m": null, "open_position": null, "close_position": null, "grip_force": null, "requires_angle": true},
+    "rubber mallet": {"approved_for_this_cell": false, "grasp_tcp_z_m": null, "open_position": null, "close_position": null, "grip_force": null, "requires_angle": true}
+  }
+}

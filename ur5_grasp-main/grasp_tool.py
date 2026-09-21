@@ -22,6 +22,7 @@ import json
 import os
 import time
 import warnings
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -33,11 +34,18 @@ import numpy as np
 
 from bsp.robot_bsp.UR_Robot import UR_Robot, load_camera_ini
 from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
+from bsp.robot_bsp.fixed_placement import load_placement, place_at_fixed_point
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
 from bsp.camera_bsp.camera_profile import max_intrinsics_delta
+from bsp.camera_bsp.tool_names import known_category, normalize_prompt
+from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
+from bsp.camera_bsp.tool_profiles import load_tool_profile
+from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
+                                                overhead_orientation,
+                                                principal_axis_base)
 from bsp.camera_bsp.screwdriver_grasp import (estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
@@ -125,6 +133,8 @@ HI_Z_OFFSET = 0.0             # 手内 z 补偿（若顶面 z 偏低可微调）
 # 一键抓取：a 粗定位后自动完成下降与夹持；等待相机稳定的超时(秒)
 ENABLE_ONE_KEY_GRASP = True
 AUTO_GRASP_TIMEOUT_S = 8.0
+ANGLE_GRASP_TIMEOUT_S = 15.0
+ANGLE_STABLE_DEG = 5.0
 
 # 夹爪
 GRIP_PORT = "COM10"
@@ -140,7 +150,34 @@ WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
 
 def main():
+    global TEXT_PROMPT, ENABLE_ROBOT_GRASP, ENABLE_SAFE_APPROACH_TEST
+    global ENABLE_SAFE_DESCENT_TEST, ENABLE_SCREWDRIVER_GRASP, ENABLE_ONE_KEY_GRASP
     args = parse_args()
+    if args.prompt:
+        TEXT_PROMPT = args.prompt
+    TEXT_PROMPT = normalize_prompt(TEXT_PROMPT)
+    tool_category = known_category(TEXT_PROMPT)
+    # Every run starts locked. The requested stage explicitly opens only the
+    # capabilities needed for that validation step.
+    ENABLE_ROBOT_GRASP = False
+    ENABLE_SAFE_APPROACH_TEST = args.stage in ("observe", "rotate", "descent", "grasp", "place")
+    ENABLE_SAFE_DESCENT_TEST = args.stage in ("descent", "grasp", "place")
+    ENABLE_SCREWDRIVER_GRASP = args.stage in ("grasp", "place")
+    ENABLE_ONE_KEY_GRASP = bool(args.auto and args.stage in ("grasp", "place"))
+    args.enable_angle_rotation = args.stage in ("rotate", "descent", "grasp", "place")
+    args.place_after_grasp = args.stage == "place"
+    args.vision_only = args.stage == "vision"
+    profile = None
+    if tool_category != "screwdriver" and args.stage in ("rotate", "descent", "grasp", "place"):
+        profile = load_tool_profile(args.profile_config, tool_category, WORKSPACE_LIMITS)
+    if args.enable_angle_rotation and tool_category != "screwdriver" and profile is None:
+        raise ValueError("non-screwdriver rotation requires an approved grasp profile")
+    if profile and profile["requires_angle"] and not args.enable_angle_rotation:
+        raise ValueError("this tool profile requires --stage rotate or a later stage")
+    if args.place_after_grasp and (tool_category != "screwdriver" and profile is None):
+        raise ValueError("fixed placement requires an enabled grasp path")
+    placement = (load_placement(args.place_config, WORKSPACE_LIMITS)
+                 if args.place_after_grasp else None)
     if ENABLE_ROBOT_GRASP and ENABLE_SAFE_APPROACH_TEST:
         raise RuntimeError("ENABLE_ROBOT_GRASP 与 ENABLE_SAFE_APPROACH_TEST 不能同时开启")
     if ENABLE_SAFE_DESCENT_TEST and not ENABLE_SAFE_APPROACH_TEST:
@@ -166,7 +203,8 @@ def main():
     if ENABLE_ROBOT_GRASP:
         print("[OK] 机械臂和夹爪已连接:", ROBOT_IP)
     elif ENABLE_SAFE_APPROACH_TEST:
-        print("[观察点模式] 机械臂控制已连接；仅允许 P 键移动到安全观察点，夹爪未初始化。")
+        print("[观察点模式] 机械臂控制已连接；夹爪%s初始化。" %
+              ("已" if gripper_enabled else "未"))
     else:
         print("[安全模式] 仅运行视觉定位，未连接机械臂控制和夹爪。")
         if robot_state.available:
@@ -201,9 +239,12 @@ def main():
     else:
         print("[双相机校正] 已加载:", CAMERA_ALIGNMENT_PATH)
 
-    detector = SamToolDetector(TEXT_PROMPT)
+    detector = SamToolDetector(TEXT_PROMPT, checkpoint=args.checkpoint,
+                               backend=args.backend)
     ho_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
     hi_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
+    angle_history = deque(maxlen=3)
+    angle_rotation_completed = False
 
     win_ho = "HO(D455)_eye_out"
     win_hi = "HI(D435I)_eye_in"
@@ -261,7 +302,7 @@ def main():
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
-    print("  R -> 螺丝刀低力夹持并抬升 %.0fmm（需完成 plane/contact 标定，默认锁定）"
+    print("  R -> 已审核工具低力夹持并抬升 %.0fmm（需对应工具标定）"
           % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
     print("  t -> 仅测试姿态归正：升高到安全高度 -> 摆正并验证；不会靠近工具或抓取")
     print("  o -> 夹爪张开     c -> 夹爪闭合     q -> 退出")
@@ -294,11 +335,19 @@ def main():
                         res_ho, ho_depth, ho_cam.scale)
                     if ho_handle is not None:
                         res_ho = result_at_handle(res_ho, ho_handle)
+                elif tool_category is not None and res_ho is not None and ho_status == "STABLE":
+                    candidate, ho_handle_reason = propose_grasp_region(
+                        res_ho["mask"], ho_depth, ho_cam.scale, tool_category)
+                    if candidate is not None:
+                        res_ho = dict(res_ho)
+                        res_ho["center"] = candidate.center_px
+                        res_ho["z_mm"] = candidate.depth_m * 1000.0
                 ho_disp = detector.draw(ho_color, res_ho)
                 ho_gate = gate_detection(res_ho, ho_status, "D455")
                 if ho_handle_reason is not None and ho_handle is None:
                     ho_gate = {"passed": False, "reasons": [ho_handle_reason]}
-                if res_ho is not None and ho_status == "STABLE":
+                if (res_ho is not None and ho_status == "STABLE"
+                        and ho_handle_reason is None):
                     pt = hand_out_result_to_base(ho, res_ho)
                     if pt is not None:
                         x, y, z = float(pt[0]), float(pt[1]), float(pt[2]) + HO_Z_OFFSET
@@ -329,6 +378,8 @@ def main():
             hi_handle_reason = None
             current_support_plane = None
             support_plane_reason = None
+            current_axis = None
+            current_orientation = None
             hi_gate = gate_detection(None, hi_status, "D435I")
             if hi_color is not None:
                 raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
@@ -339,11 +390,19 @@ def main():
                         res_hi, hi_depth, robot.camera.scale)
                     if hi_handle is not None:
                         res_hi = result_at_handle(res_hi, hi_handle)
+                elif tool_category is not None and res_hi is not None and hi_status == "STABLE":
+                    candidate, hi_handle_reason = propose_grasp_region(
+                        res_hi["mask"], hi_depth, robot.camera.scale, tool_category)
+                    if candidate is not None:
+                        res_hi = dict(res_hi)
+                        res_hi["center"] = candidate.center_px
+                        res_hi["z_mm"] = candidate.depth_m * 1000.0
                 hi_disp = detector.draw(hi_color, res_hi)
                 hi_gate = gate_detection(res_hi, hi_status, "D435I")
                 if hi_handle_reason is not None and hi_handle is None:
                     hi_gate = {"passed": False, "reasons": [hi_handle_reason]}
-                if res_hi is not None and res_hi["z_mm"] is not None and hi_status == "STABLE":
+                if (res_hi is not None and res_hi["z_mm"] is not None
+                        and hi_status == "STABLE" and hi_handle_reason is None):
                     camera_mm = robot.pixel_to_camera(*res_hi["center"], res_hi["z_mm"])
                     hi_camera = tuple((camera_mm / 1000.0).tolist())
                     # Full grasp and safe-observation mode both own the robot
@@ -358,12 +417,24 @@ def main():
                             state["hi_base"] = (x, y, z)
                             hi_gate = gate_detection(
                                 res_hi, hi_status, "D435I", state["hi_base"])
-                            if TEXT_PROMPT.strip().lower() == "a screwdriver":
-                                def hi_pixel_to_base(u, v, depth_m):
-                                    point_camera_mm = robot.pixel_to_camera(u, v, depth_m * 1000.0)
-                                    _, point_base_mm = robot.camera_to_base(
-                                        point_camera_mm, tcp_pose=tcp_pose)
-                                    return np.asarray(point_base_mm, dtype=np.float64) / 1000.0
+                            def hi_pixel_to_base(u, v, depth_m):
+                                point_camera_mm = robot.pixel_to_camera(u, v, depth_m * 1000.0)
+                                _, point_base_mm = robot.camera_to_base(
+                                    point_camera_mm, tcp_pose=tcp_pose)
+                                return np.asarray(point_base_mm, dtype=np.float64) / 1000.0
+                            if (args.enable_angle_rotation or args.show_angle) and tool_category in (
+                                    "screwdriver", "adjustable wrench", "rubber mallet",
+                                    "tape dispenser"):
+                                current_axis, angle_reason = principal_axis_base(
+                                    res_hi["mask"], hi_depth * robot.camera.scale,
+                                    hi_pixel_to_base)
+                                if current_axis is not None:
+                                    angle_history.append(current_axis)
+                                    current_orientation = overhead_orientation(
+                                        current_axis, tcp_pose[3:6], TOOL_ORIENTATION)
+                                else:
+                                    angle_history.clear()
+                            if tool_category is not None:
                                 current_support_plane, support_plane_reason = fit_horizontal_support_plane(
                                     hi_depth, robot.camera.scale, hi_pixel_to_base,
                                     exclude_mask=res_hi.get("mask"))
@@ -380,6 +451,11 @@ def main():
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
                 alignment_applied=camera_alignment is not None)
             state["association"] = association
+            if current_axis is None:
+                angle_history.clear()
+            angle_stable = (len(angle_history) == angle_history.maxlen and
+                            all(axial_difference_deg(angle_history[0], item)
+                                <= ANGLE_STABLE_DEG for item in angle_history))
             approach_destination, approach_reason = safe_approach_candidate(association)
             if ENABLE_SAFE_APPROACH_TEST and approach_destination is not None:
                 approach_ready_streak += 1
@@ -400,19 +476,42 @@ def main():
                 state["hi_base"], hi_gate, observation_active,
                 support_plane=current_support_plane,
                 calibration=screwdriver_calibration,
-                handle_thickness_m=handle_thickness)
+                handle_thickness_m=handle_thickness,
+                profile=profile,
+                orientation=(current_orientation if args.enable_angle_rotation
+                             and angle_stable else None))
             if observation_active and grasp_preview.get("ready"):
                 descent_ready_streak += 1
             else:
                 descent_ready_streak = 0
 
             # 一键抓取：a 粗定位后自动推进 D 与 R，任一步超时/失败即停在安全位置。
-            if auto_grasp_state == "wait_descent":
+            if auto_grasp_state == "wait_rotation":
+                if time.time() > auto_grasp_deadline:
+                    print("[一键抓取] 工具方向未稳定，停在观察点。")
+                    auto_grasp_state = "idle"
+                elif grasp_preview.get("ready") and angle_stable and current_orientation:
+                    if rotate_to_planar_orientation(robot, current_orientation):
+                        hi_filter.reset()
+                        angle_history.clear()
+                        angle_rotation_completed = True
+                        auto_grasp_state = "wait_descent"
+                        auto_grasp_deadline = time.time() + ANGLE_GRASP_TIMEOUT_S
+                    else:
+                        auto_grasp_state = "idle"
+            elif auto_grasp_state == "wait_descent":
                 if time.time() > auto_grasp_deadline:
                     print("[一键抓取] 超时：D435i 未稳定，停在观察点，不下降。")
                     auto_grasp_state = "idle"
-                elif (descent_ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES
+                elif (not args.enable_angle_rotation or angle_rotation_completed) and (
+                      descent_ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES
                       and grasp_preview.get("ready")):
+                    if args.enable_angle_rotation and (not current_orientation or
+                            _orientation_error_deg(_read_valid_tcp_pose(robot)[3:6],
+                                                   current_orientation) > ANGLE_STABLE_DEG):
+                        print("[一键抓取] 旋转后方向不一致，禁止下降。")
+                        auto_grasp_state = "idle"
+                        continue
                     locked = attempt_descent(robot, grasp_preview, current_support_plane)
                     if locked is None:
                         print("[一键抓取] 下降未通过安全门，停在观察点。")
@@ -431,9 +530,20 @@ def main():
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
-                        current_support_plane, screwdriver_calibration, state["hi_base"])
+                        current_support_plane, screwdriver_calibration, state["hi_base"],
+                        grip_profile=profile)
                     if status == "done":
-                        print("[一键抓取] 完成。按 o 可松开。")
+                        if placement is not None:
+                            try:
+                                place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
+                                                     (profile["open_position"] if profile else GRIP_OPEN_POS),
+                                                     GRIP_OPEN_SPEED,
+                                                     GRIP_OPEN_FORCE)
+                                print("[一键抓取] 已在固定位置放下工具。")
+                            except Exception as exc:
+                                print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
+                        else:
+                            print("[一键抓取] 已夹起并停住。按 o 可松开。")
                         auto_grasp_state = "idle"
                     elif status == "failed":
                         print("[一键抓取] " + (message or "夹持失败"))
@@ -462,6 +572,11 @@ def main():
                 association_text = association_status_text(
                     association, ENABLE_SAFE_APPROACH_TEST,
                     approach_ready_streak, approach_reason)
+            if current_axis is not None:
+                cv2.putText(hi_disp, "BASE AXIS %.1f deg %s" %
+                            (np.degrees(current_axis), "STABLE" if angle_stable else "TRACKING"),
+                            (12, hi_disp.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, (0, 255, 255), 2, cv2.LINE_AA)
             draw_header(hi_disp, "D435I WRIST [%s:%d]" % (position_text, sample_count),
                         hi_status, hi_coord, gate_reason_text(hi_gate), association_text)
             draw_header(ho_disp, "D455 GLOBAL [%s:%d]" % (position_text, sample_count),
@@ -502,14 +617,16 @@ def main():
                       % active_position)
             elif key == ord('o'):
                 if gripper_enabled:
-                    robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-                    print("[夹爪] 张开 pos=%d" % GRIP_OPEN_POS)
+                    open_position = profile["open_position"] if profile else GRIP_OPEN_POS
+                    robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+                    print("[夹爪] 张开 pos=%d" % open_position)
                 else:
                     print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('c'):
                 if gripper_enabled:
-                    robot.grip(GRIP_CLOSE_POS, GRIP_SPEED, GRIP_FORCE)
-                    print("[夹爪] 闭合 pos=%d" % GRIP_CLOSE_POS)
+                    close_position = profile["close_position"] if profile else GRIP_CLOSE_POS
+                    robot.grip(close_position, GRIP_SPEED, GRIP_FORCE)
+                    print("[夹爪] 闭合 pos=%d" % close_position)
                 else:
                     print("[安全锁定] 夹爪未启用，无法控制。")
             elif key == ord('t'):
@@ -529,15 +646,19 @@ def main():
                 else:
                     print("[D455粗定位] 仅用D455对齐坐标移动到目标上方；腕部相机此时可能还看不到工具。")
                     if move_to_safe_observation(robot, coarse_destination):
+                        angle_rotation_completed = False
                         d455_detection_frozen = True
                         observation_active = True
                         ho_filter.reset()
-                        if ENABLE_ONE_KEY_GRASP:
-                            auto_grasp_state = "wait_descent"
-                            auto_grasp_deadline = time.time() + AUTO_GRASP_TIMEOUT_S
+                        if ENABLE_ONE_KEY_GRASP and (tool_category == "screwdriver" or profile is not None):
+                            auto_grasp_state = ("wait_rotation" if args.enable_angle_rotation
+                                                else "wait_descent")
+                            auto_grasp_deadline = time.time() + (
+                                ANGLE_GRASP_TIMEOUT_S if args.enable_angle_rotation
+                                else AUTO_GRASP_TIMEOUT_S)
                             print("[一键抓取] 已进入自动模式：等 D435i 稳定后自动下降并夹持。")
                         else:
-                            print("[D455粗定位完成] 已停在目标上方；请等 D435i 稳定后按 D。")
+                            print("[D455粗定位完成] 已停在目标上方；仅螺丝刀有自动抓取路径。")
             elif key == ord('p'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -548,6 +669,7 @@ def main():
                           (approach_ready_streak, SAFE_APPROACH_CONFIRM_FRAMES))
                 else:
                     if move_to_safe_observation(robot, approach_destination):
+                        angle_rotation_completed = False
                         d455_detection_frozen = True
                         observation_active = True
                         ho_filter.reset()
@@ -560,6 +682,12 @@ def main():
                     print("[安全锁定] 本次运行已完成一次无接触下降；请重启程序后再测试。")
                 elif not observation_active:
                     print("[安全锁定] 请先完成 a（D455粗定位）或 P（双相机观察点）。")
+                elif args.enable_angle_rotation and not angle_rotation_completed:
+                    print("[安全锁定] 请先按 y 在安全高度旋转并等待 D435i 重新稳定。")
+                elif args.enable_angle_rotation and (not angle_stable or not current_orientation or
+                        _orientation_error_deg(_read_valid_tcp_pose(robot)[3:6],
+                                               current_orientation) > ANGLE_STABLE_DEG):
+                    print("[安全锁定] 旋转后方向未重新稳定或与当前姿态不一致。")
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
                 elif descent_ready_streak < SAFE_DESCENT_CONFIRM_FRAMES:
@@ -573,24 +701,43 @@ def main():
                         safe_descent_completed = True
                         print("[无接触下降] 已锁定D键触发时的目标中心；后续画面不再跟随分割中心漂移。")
             elif key == ord('r'):
-                if TEXT_PROMPT.strip().lower() != "a screwdriver":
-                    print("[安全锁定] R 目前只实现了螺丝刀手柄抓取；请使用 TEXT_PROMPT = 'a screwdriver'。")
-                elif not ENABLE_SCREWDRIVER_GRASP:
-                    print("[安全锁定] 请先完成两次只读标定，并将 ENABLE_SCREWDRIVER_GRASP 改为 True。")
-                elif screwdriver_calibration is None:
+                if not ENABLE_SCREWDRIVER_GRASP:
+                    print("[安全锁定] 此工具尚未启用经过审核的抓取配置。")
+                elif tool_category == "screwdriver" and screwdriver_calibration is None:
                     print("[安全锁定] 未找到有效 grasp_surface_calibration.json。")
                 elif not safe_descent_completed or locked_screwdriver_handle is None:
                     print("[安全锁定] 请先完成 P 和 D 无接触下降测试。")
                 elif "grasp_tcp_z_m" not in locked_screwdriver_handle:
                     print("[安全锁定] D 未记录自适应夹持高度；请重新运行 P → D。")
-                elif not (hi_gate["passed"] and hi_handle is not None and current_support_plane is not None):
+                elif not (hi_gate["passed"] and (hi_handle is not None or profile is not None)
+                          and current_support_plane is not None):
                     print("[安全锁定] 等待稳定手柄区域和当前支撑面。")
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
-                        current_support_plane, screwdriver_calibration, state["hi_base"])
+                        current_support_plane, screwdriver_calibration, state["hi_base"],
+                        grip_profile=profile)
                     if message:
                         print("[安全锁定] " + message)
+                    if status == "done" and placement is not None:
+                        try:
+                            place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
+                                                 (profile["open_position"] if profile else GRIP_OPEN_POS),
+                                                 GRIP_OPEN_SPEED,
+                                                 GRIP_OPEN_FORCE)
+                            print("[固定放置] 完成。")
+                        except Exception as exc:
+                            print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
+            elif key == ord('y'):
+                if not args.enable_angle_rotation or not observation_active:
+                    print("[安全锁定] 使用 --stage rotate 或后续阶段并先到达观察点。")
+                elif not (angle_stable and current_orientation and grasp_preview.get("ready")):
+                    print("[安全锁定] D435i 方向或抓取预览尚未稳定。")
+                elif rotate_to_planar_orientation(robot, current_orientation):
+                    hi_filter.reset()
+                    angle_history.clear()
+                    angle_rotation_completed = True
+                    print("[方向对齐] 已旋转；等待 D435i 重新定位后再按 D。")
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
@@ -738,14 +885,15 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied):
 
 def build_grasp_preview(hi_base, hi_gate, observation_active,
                         support_plane=None, calibration=None,
-                        handle_thickness_m=None):
+                        handle_thickness_m=None, orientation=None, profile=None):
     """Plan the descent to the handle mid using the adaptive grasp model.
 
     The handle thickness is estimated from its projected width every attempt, and
     the tool-independent ``gripper_offset_m`` converts the handle mid height into
     a TCP height.  A different screwdriver therefore needs no new calibration.
     """
-    preview = {"active": bool(observation_active), "ready": False}
+    preview = {"active": bool(observation_active), "ready": False,
+               "orientation": orientation or TOOL_ORIENTATION}
     if not observation_active:
         return preview
     if not hi_gate["passed"] or hi_base is None:
@@ -758,7 +906,18 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
 
     plan = None
     grasp_tcp_z = None
-    if (calibration is not None and support_plane is not None
+    if profile is not None:
+        if support_plane is None:
+            preview["reason"] = "support plane unavailable for tool profile"
+            return preview
+        grasp_tcp_z = float(profile["grasp_tcp_z_m"])
+        if not 0.005 <= grasp_tcp_z - support_plane.z_m <= 0.25:
+            preview["reason"] = "profile grip height inconsistent with current support plane"
+            return preview
+        plan = {"grasp_tcp_z_m": grasp_tcp_z,
+                "support_plane_z_m": support_plane.z_m,
+                "profile_grasp": True}
+    elif (calibration is not None and support_plane is not None
             and handle_thickness_m is not None):
         grasp_tcp_z, plan = plan_grasp_tcp(
             float(handle_thickness_m), float(support_plane.z_m),
@@ -1038,11 +1197,12 @@ def _orientation_error_deg(actual_rvec, target_rvec):
     return float(np.degrees(np.arccos(cos_angle)))
 
 
-def verify_tool_orientation(robot, stage):
+def verify_tool_orientation(robot, stage, expected=None):
     """检查末端是否到达标准朝下姿态；读取或误差异常时返回False。"""
     try:
         actual = _read_valid_tcp_pose(robot)
-        error_deg = _orientation_error_deg(actual[3:6], TOOL_ORIENTATION)
+        error_deg = _orientation_error_deg(actual[3:6],
+                                           TOOL_ORIENTATION if expected is None else expected)
         print("[姿态验证:%s] 实际TCP=%s" %
               (stage, ["%.4f" % v for v in actual]))
         print("[姿态验证:%s] 与标准朝下姿态误差=%.3f°（允许≤%.1f°）" %
@@ -1053,6 +1213,23 @@ def verify_tool_orientation(robot, stage):
         return True
     except Exception as exc:
         print("[安全中止] 无法验证末端姿态：%s" % exc)
+        return False
+
+
+def rotate_to_planar_orientation(robot, orientation):
+    """Rotate only at the high observation pose; the wrist camera must reobserve."""
+    try:
+        current = _read_valid_tcp_pose(robot)
+        if current[2] < SAFE_TRAVEL_Z_M - 0.005:
+            print("[安全中止] 低于安全观察高度，禁止旋转。")
+            return False
+        target = current.copy()
+        target[3:6] = orientation
+        robot.moveL(target.tolist(), speed=SAFE_APPROACH_SPEED,
+                    acceleration=SAFE_APPROACH_ACCELERATION)
+        return verify_tool_orientation(robot, "平面方向对齐", orientation)
+    except Exception as exc:
+        print("[安全中止] 方向对齐失败：%s" % exc)
         return False
 
 
@@ -1158,7 +1335,8 @@ def move_to_safe_descent_test(robot, preview):
     pregrasp = np.asarray(preview["pregrasp_xyz_m"], dtype=np.float64)
     stop_point = grasp_point.copy()
     stop_point[2] += SAFE_DESCENT_CLEARANCE_M
-    if preview.get("plan"):
+    orientation = preview.get("orientation", TOOL_ORIENTATION)
+    if preview.get("plan") and "handle_thickness_m" in preview["plan"]:
         plan = preview["plan"]
         print("[抓取几何] 手柄厚度=%.1fmm 手柄中段z=%.4f 夹爪偏移=%.1fmm 夹持TCP z=%.4f" % (
             plan["handle_thickness_m"] * 1000.0, plan["handle_mid_z_m"],
@@ -1175,34 +1353,34 @@ def move_to_safe_descent_test(robot, preview):
         if current[2] < SAFE_TRAVEL_Z_M - 0.005:
             print("[安全中止] 当前TCP不在安全观察高度，拒绝下降测试。")
             return False
-        if not verify_tool_orientation(robot, "无接触下降前"):
+        if not verify_tool_orientation(robot, "无接触下降前", orientation):
             return False
 
         # Horizontal correction happens only at the already verified high point.
         high_align = current.copy()
         high_align[0:2] = target[0:2]
         high_align[2] = max(float(current[2]), SAFE_TRAVEL_Z_M)
-        high_align[3:6] = TOOL_ORIENTATION
+        high_align[3:6] = orientation
         print("[无接触下降] 安全高度对准 XY=%s" %
               ["%.4f" % value for value in high_align[0:3]])
         robot.moveL(high_align.tolist(), speed=SAFE_DESCENT_SPEED,
                     acceleration=SAFE_DESCENT_ACCELERATION)
 
-        pregrasp_pose = pregrasp.tolist() + TOOL_ORIENTATION
+        pregrasp_pose = pregrasp.tolist() + list(orientation)
         print("[无接触下降] 下降到预抓取高度=%s" %
               ["%.4f" % value for value in pregrasp_pose])
         robot.moveL(pregrasp_pose, speed=SAFE_DESCENT_SPEED,
                     acceleration=SAFE_DESCENT_ACCELERATION)
-        if not verify_tool_orientation(robot, "预抓取高度"):
+        if not verify_tool_orientation(robot, "预抓取高度", orientation):
             return False
 
-        stop_pose = stop_point.tolist() + TOOL_ORIENTATION
+        stop_pose = stop_point.tolist() + list(orientation)
         print("[无接触下降] 低速停在夹持点上方 %.0fmm=%s" % (
             SAFE_DESCENT_CLEARANCE_M * 1000.0,
             ["%.4f" % value for value in stop_pose]))
         robot.moveL(stop_pose, speed=SAFE_DESCENT_SPEED,
                     acceleration=SAFE_DESCENT_ACCELERATION)
-        if not verify_tool_orientation(robot, "无接触终点"):
+        if not verify_tool_orientation(robot, "无接触终点", orientation):
             return False
         print("[无接触下降完成] 已停在夹持点上方 %.0fmm；未接触工具、未控制夹爪。" %
               (SAFE_DESCENT_CLEARANCE_M * 1000.0))
@@ -1218,7 +1396,7 @@ def move_to_safe_descent_test(robot, preview):
 
 
 def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
-                              calibration):
+                              calibration, orientation=None, grip_profile=None):
     """Perform the guarded final stage after a verified no-contact descent.
 
     ``grasp_tcp_z`` is planned from the live handle thickness and the one-time
@@ -1227,6 +1405,15 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
     above this height; R descends the remaining distance and closes the gripper.
     """
     target = np.asarray(target_xyz_m, dtype=np.float64).reshape(3)
+    orientation = TOOL_ORIENTATION if orientation is None else orientation
+    open_position = (GRIP_OPEN_POS if grip_profile is None
+                     else grip_profile["open_position"])
+    close_position = (GRIP_CLOSE_POS if grip_profile is None
+                      else grip_profile["close_position"])
+    grip_force = (SCREWDRIVER_GRASP_FORCE if grip_profile is None
+                  else grip_profile["grip_force"])
+    torque_min = (GRIP_TORQUE_MIN if grip_profile is None
+                  else grip_profile["torque_min"])
     final = target.copy()
     final[2] = float(grasp_tcp_z)
     plane_clearance = final[2] - float(support_plane_z_m)
@@ -1245,31 +1432,33 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
             print("[安全中止] 当前TCP未停在D无接触终点（偏差 %.1fmm），拒绝执行R。" %
                   (start_error_m * 1000.0))
             return False
-        if not verify_tool_orientation(robot, "螺丝刀夹持前"):
+        if not verify_tool_orientation(robot, "螺丝刀夹持前", orientation):
             return False
         high_align = current.copy()
         high_align[:2] = target[:2]
         high_align[2] = max(float(current[2]), float(retreat[2]))
-        high_align[3:6] = TOOL_ORIENTATION
-        robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+        high_align[3:6] = orientation
+        if robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE) == -1:
+            raise RuntimeError("gripper did not open")
         print("[螺丝刀抓取] 在安全高度对准手柄中段。")
         robot.moveL(high_align.tolist(), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
         print("[螺丝刀抓取] 低速下降到夹持高度=%s" %
               ["%.4f" % value for value in final])
-        robot.moveL(final.tolist() + TOOL_ORIENTATION, speed=SCREWDRIVER_GRASP_SPEED,
+        robot.moveL(final.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        if not verify_tool_orientation(robot, "闭爪前"):
+        if not verify_tool_orientation(robot, "闭爪前", orientation):
             return False
-        robot.grip(GRIP_CLOSE_POS, GRIP_SPEED, SCREWDRIVER_GRASP_FORCE)
+        if robot.grip(close_position, GRIP_SPEED, grip_force) == -1:
+            raise RuntimeError("gripper did not close")
         torque_reached = robot.read_torque_reached()
         torque_current = robot.read_torque_current()
-        contact_confirmed = torque_reached == 1 or torque_current >= GRIP_TORQUE_MIN
+        contact_confirmed = torque_reached == 1 or torque_current >= torque_min
         if not contact_confirmed:
             print("[夹持失败] reached=%s torque=%s；张开并退回安全高度，不抬升工具。" %
                   (torque_reached, torque_current))
-            robot.grip(GRIP_OPEN_POS, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
-            robot.moveL(retreat.tolist() + TOOL_ORIENTATION, speed=SCREWDRIVER_GRASP_SPEED,
+            robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+            robot.moveL(retreat.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                         acceleration=SCREWDRIVER_GRASP_SPEED)
             return False
         lift = final.copy()
@@ -1278,7 +1467,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
             print("[安全中止] %.0fmm 测试抬升点超出工作空间；不抬升。"
                   % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
             return False
-        robot.moveL(lift.tolist() + TOOL_ORIENTATION, speed=SCREWDRIVER_GRASP_SPEED,
+        robot.moveL(lift.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
         print("[螺丝刀抓取完成] reached=%s torque=%s；已低力夹持并抬升 %.0fmm，停在抬升位置。"
               % (torque_reached, torque_current, SCREWDRIVER_TEST_LIFT_M * 1000.0))
@@ -1305,6 +1494,7 @@ def attempt_descent(robot, grasp_preview, current_support_plane):
         "target_base_xyz_m": list(grasp_preview["target_surface_xyz_m"]),
         "support_plane_z_m": (current_support_plane.z_m
                               if current_support_plane is not None else None),
+        "orientation": list(grasp_preview.get("orientation", TOOL_ORIENTATION)),
     }
     if grasp_preview.get("adaptive"):
         locked["grasp_tcp_z_m"] = float(grasp_preview["endpoint_xyz_m"][2])
@@ -1312,17 +1502,21 @@ def attempt_descent(robot, grasp_preview, current_support_plane):
 
 
 def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plane,
-                  calibration, current_target):
+                  calibration, current_target, grip_profile=None):
     """Run the guarded final grasp.
 
     Returns ``(status, message)`` where status is ``"waiting"`` (not ready yet),
     ``"done"`` or ``"failed"``.  Shared by the manual R key and the one-key grasp.
     """
-    if not (hi_gate["passed"] and hi_handle is not None
-            and current_support_plane is not None):
+    if not (hi_gate["passed"] and (hi_handle is not None or grip_profile is not None)
+            and current_support_plane is not None and current_target is not None):
         return "waiting", "等待稳定手柄区域和当前支撑面。"
     if locked_handle is None or "grasp_tcp_z_m" not in locked_handle:
         return "failed", "未记录自适应夹持高度；请重新运行下降。"
+    locked_plane_z = locked_handle.get("support_plane_z_m")
+    if (locked_plane_z is None or abs(current_support_plane.z_m - locked_plane_z)
+            > SUPPORT_PLANE_SHIFT_MAX_M):
+        return "failed", "下降后支撑面高度发生变化；拒绝继续夹持。"
     locked_target = np.asarray(locked_handle["target_base_xyz_m"], dtype=np.float64)
     target_shift = float(np.linalg.norm(
         np.asarray(current_target, dtype=np.float64) - locked_target))
@@ -1330,12 +1524,31 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
         return "failed", "手柄目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
     ok = execute_screwdriver_grasp(
         robot, locked_target, float(locked_handle["grasp_tcp_z_m"]),
-        current_support_plane.z_m, calibration)
+        current_support_plane.z_m, calibration,
+        orientation=locked_handle.get("orientation", TOOL_ORIENTATION),
+        grip_profile=grip_profile)
     return ("done", None) if ok else ("failed", "夹持未完成（力矩或姿态未通过）。")
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="文字指定工具抓取（手外粗定位->手内精定位->抓取）")
+    p.add_argument("--prompt", help="English tool name, e.g. 'a screwdriver'")
+    p.add_argument("--backend", choices=("clipseg_mobilesam", "yoloe"),
+                   default="clipseg_mobilesam", help="local segmentation backend")
+    p.add_argument("--checkpoint", help="override the selected backend's local weights")
+    p.add_argument("--stage", choices=("vision", "observe", "rotate", "descent",
+                                       "grasp", "place"), default="vision",
+                   help="explicit validation stage; default vision sends no motion commands")
+    p.add_argument("--auto", action="store_true",
+                   help="for grasp/place stages, let key 'a' advance after observation")
+    p.add_argument("--profile-config", type=Path,
+                   default=SCRIPT_ROOT / "tool_profiles.json",
+                   help="cell-specific approved tool grip parameters")
+    p.add_argument("--show-angle", action="store_true",
+                   help="display base-plane tool angle without enabling rotation")
+    p.add_argument("--place-config", type=Path,
+                   default=SCRIPT_ROOT / "fixed_placement.json",
+                   help="approved fixed-placement coordinates for this cell")
     p.add_argument("--gripper-test", action="store_true",
                    help="仅测试夹爪：交互式发送 position 并回显，用于定开/合值")
     p.add_argument("--check-calib", action="store_true",

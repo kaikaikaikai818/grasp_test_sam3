@@ -1,0 +1,2 @@
+# Optional open-vocabulary segmentation; install separately from the tested baseline.
+ultralytics>=8.4.0,<9

@@ -12,18 +12,24 @@ MOBILE_SAM_ROOT = Path(__file__).resolve().parents[3]
 if str(MOBILE_SAM_ROOT) not in sys.path:
     sys.path.insert(0, str(MOBILE_SAM_ROOT))
 
-from light_sam.engine import LightSamEngine
-
-
 class SamToolDetector:
     """Keep the models resident and expose the result shape used by the UR5 code."""
 
-    def __init__(self, prompt, checkpoint=None, min_depth_m=0.15, max_depth_m=3.0):
+    def __init__(self, prompt, checkpoint=None, min_depth_m=0.15, max_depth_m=3.0,
+                 backend="clipseg_mobilesam"):
         self.prompt = prompt.strip()
         if not self.prompt:
             raise ValueError("工具文字提示不能为空")
-        checkpoint = checkpoint or MOBILE_SAM_ROOT / "weights" / "mobile_sam.pt"
-        self.engine = LightSamEngine(str(checkpoint), self.prompt, local_files_only=True)
+        if backend == "clipseg_mobilesam":
+            from light_sam.engine import LightSamEngine
+            checkpoint = checkpoint or MOBILE_SAM_ROOT / "weights" / "mobile_sam.pt"
+            self.engine = LightSamEngine(str(checkpoint), self.prompt, local_files_only=True)
+        elif backend == "yoloe":
+            from .yoloe_tool_detect import YoloEEngine
+            checkpoint = checkpoint or MOBILE_SAM_ROOT / "weights" / "yoloe-26s-seg.pt"
+            self.engine = YoloEEngine(self.prompt, str(checkpoint), local_files_only=True)
+        else:
+            raise ValueError("unknown detector backend: %s" % backend)
         self.min_depth_m = float(min_depth_m)
         self.max_depth_m = float(max_depth_m)
 
@@ -75,6 +81,7 @@ class SamToolDetector:
 
     def detect_all(self, bgr, depth_raw, depth_scale):
         inference = self.engine.infer(bgr)
+        self.last_inference = inference
         results = [self._to_result(item, depth_raw, depth_scale)
                    for item in inference.segmentations]
         return sorted(results, key=lambda item: item["score"], reverse=True)
