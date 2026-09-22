@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import yaml
 
-from grasp_backend import GraspPredictor
+from grasp_backend import GeometryGraspPredictor
 from grasp_backend.postprocessing import heatmap
 from segmentation import SamPipeline
 
@@ -16,8 +16,7 @@ def load_config(path: str | Path) -> dict:
     config_path = Path(path).resolve()
     with config_path.open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream) or {}
-    for section, key in (("sam", "checkpoint"), ("sam", "clipseg_model"),
-                         ("grasp", "checkpoint")):
+    for section, key in (("sam", "checkpoint"), ("sam", "clipseg_model")):
         value = Path(config[section][key])
         if not value.is_absolute():
             value = (config_path.parent / value).resolve()
@@ -38,10 +37,10 @@ def build_models(config: dict):
         sam_score_tolerance=sam_cfg.get("sam_score_tolerance", 0.12),
         max_mask_fraction=sam_cfg.get("max_mask_fraction", 0.70),
     )
-    grasp = GraspPredictor(
-        grasp_cfg["checkpoint"], grasp_cfg.get("device", "cuda"),
-        grasp_cfg.get("input_size", 224),
-    )
+    backend = grasp_cfg.get("backend", "geometry")
+    if backend != "geometry":
+        raise ValueError(f"unsupported grasp backend: {backend}")
+    grasp = GeometryGraspPredictor(grasp_cfg.get("opening_scale", 1.15))
     return sam, grasp
 
 
@@ -99,7 +98,7 @@ def save_result(output: Path, image: np.ndarray, prompt: str, objects, predictio
     metadata = {
         "prompt": prompt, "object_count": len(objects), "objects": object_json,
         "transform": prediction.transform if prediction else None,
-        "model": "PromptGD GR-ConvNet+CLIP baseline",
+        "model": prediction.backend if prediction else None,
         "robot_motion_authorized": False,
         "warning": "visual research output only; no collision or robot validation",
     }

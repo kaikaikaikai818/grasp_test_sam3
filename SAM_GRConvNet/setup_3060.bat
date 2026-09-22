@@ -13,5 +13,5 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 .venv\Scripts\python.exe check_environment.py
 if errorlevel 1 exit /b 1
-echo Environment ready. Edit config.yaml, then run demo_image.bat.
+echo Environment ready. Run demo_image.bat for an image-only visual check.
 pause

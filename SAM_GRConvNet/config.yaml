@@ -14,6 +14,5 @@ sam:
   max_mask_fraction: 0.70
 
 grasp:
-  checkpoint: weights/grconvnet_clip_promptgd.pt
-  input_size: 224
-  device: cuda
+  backend: geometry
+  opening_scale: 1.15

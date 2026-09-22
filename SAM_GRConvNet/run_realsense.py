@@ -41,7 +41,7 @@ def main():
             view = (last_overlay.copy() if last_overlay is not None else image.copy())
             cv2.putText(view, "G: infer once   Q/Esc: exit   VISUAL ONLY",
                         (12, 28), cv2.FONT_HERSHEY_SIMPLEX, .65, (0, 255, 255), 2)
-            cv2.imshow("SAM + GR-ConvNet/CLIP (no robot output)", view)
+            cv2.imshow("Text-guided planar grasp (no robot output)", view)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break

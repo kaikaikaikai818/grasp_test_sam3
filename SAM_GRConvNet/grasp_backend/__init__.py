@@ -1,5 +1,6 @@
-"""Public API for the isolated GR-ConvNet/CLIP grasp backend."""
+"""Public API for planar grasp backends."""
 
-from .predictor import GraspPredictor, PredictionResult
+from .geometry import GeometryGraspPredictor
+from .types import PredictionResult
 
-__all__ = ["GraspPredictor", "PredictionResult"]
+__all__ = ["GeometryGraspPredictor", "PredictionResult"]

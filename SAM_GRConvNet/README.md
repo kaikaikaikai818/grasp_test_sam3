@@ -1,35 +1,29 @@
-# SAM + GR-ConvNet/CLIP 独立视觉项目
+# 文字引导的平面抓取项目
 
 本项目把文字目标分割与二维抓取预测组合为一条独立视觉链路：
 
 ```text
-图片或 RealSense → CLIPSeg → MobileSAM → GR-ConvNet+CLIP
-                  → SAM mask 约束 → 抓取候选与可视化
+图片或 RealSense → CLIPSeg → MobileSAM → mask 几何抓取
+                  → 安全检查 → 抓取候选与可视化
 ```
 
 CLIPSeg 只提供目标上的语义种子点。默认的 `complete_object: true` 会让 MobileSAM
 在多个尺度的候选中选择完整且不属于整片背景的物体轮廓，避免长柄工具只保留最显著的头部。
 
-当前版本只输出研究用视觉结果，永远不会连接或控制 UR5。公开抓取权重在现有扳手图上出现过角度退化和宽度过大的情况，因此必须先通过批量旋转一致性验收。
+当前版本只输出研究用视觉结果，永远不会连接或控制 UR5。几何后端根据完整 mask 的主轴、局部厚度和安全边界计算平面抓取，适合先验证桌面上的扳手、螺丝刀和钳子。接入机器人前仍必须通过批量旋转一致性和 RealSense 深度验收。
 
 ## 目录和共享权重
 
-项目自带 MobileSAM 代码及运行所需的最小 PromptGD 源码。以下两个模型通过 `config.yaml` 共享，不复制：
+项目自带 MobileSAM 代码。以下两个模型通过 `config.yaml` 共享，不复制：
 
 - `../weights/mobile_sam.pt`，约 39 MB；
 - `../weights/clipseg-rd64-refined/`，约 575 MB。
-
-本项目自己的抓取权重位于 `weights/grconvnet_clip_promptgd.pt`，约 345 MB。它必须匹配 SHA256：
-
-```text
-b4a83e0c4b0db85bcbd70966f32807d8968b11cd18bd81ac2fc4c97046f8f680
-```
 
 如果迁移到另一台电脑，编辑 `config.yaml` 中的两个 SAM 路径。相对路径以 `config.yaml` 所在目录为基准，也可以填写 Windows 绝对路径。
 
 ## RTX 3060 Ti 环境
 
-要求 Windows 10/11 64 位、Python 3.12 64 位和可用的 NVIDIA 驱动。双击 `setup_3060.bat` 会创建本目录专用 `.venv`，安装 PyTorch 2.7.1/cu118、torchvision 0.22.1 及 `requirements.txt` 中的固定版本，然后验证 CUDA、显卡和三个模型路径。无需单独安装 CUDA Toolkit，也不会修改 LGD 环境。
+要求 Windows 10/11 64 位、Python 3.12 64 位和可用的 NVIDIA 驱动。双击 `setup_3060.bat` 会创建本目录专用 `.venv`，安装 PyTorch 2.7.1/cu118、torchvision 0.22.1 及 `requirements.txt` 中的固定版本，然后验证 CUDA、显卡和两个分割模型路径。无需单独安装 CUDA Toolkit，也不会修改 LGD 环境。
 
 安装完成后运行单图演示：
 
@@ -88,6 +82,6 @@ python inventory_lgd.py "D:\zky\LGD" --output lgd_inventory.json
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试覆盖非方形图像坐标还原、mask 外高分排除、小 mask、弱角度、异常宽度以及轴向角度的 180° 周期。
+测试覆盖完整物体 mask 选择、几何抓取中心、mask 外高分排除、小 mask、弱角度、异常宽度以及轴向角度的 180° 周期。
 
-第三方 GR-ConvNet+CLIP 代码来自 PromptGD，版本 `d74444244bb5c25151aff812373a195c5881d558`，许可证见 `third_party_promptgd/LICENSE`。抓取权重来自作者公开的 `240430_1011_/epoch_50_iou_0.23.pt`。
+旧 PromptGD 权重在实拍扳手上持续输出异常宽度，现已从正式流程移除。历史实现仍可从 Git 记录查阅，不再占用主程序结构。

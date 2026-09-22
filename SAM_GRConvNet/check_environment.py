@@ -16,7 +16,6 @@ def main():
     config = load_config(Path(__file__).with_name("config.yaml"))
     missing = [path for path in (
         config["sam"]["checkpoint"], config["sam"]["clipseg_model"],
-        config["grasp"]["checkpoint"],
     ) if not Path(path).exists()]
     if missing:
         raise FileNotFoundError("Missing configured model path(s):\n" + "\n".join(missing))
