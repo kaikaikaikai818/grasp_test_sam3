@@ -23,14 +23,16 @@ def _principal_axis(mask: np.ndarray) -> tuple[np.ndarray, float]:
     return major, anisotropy
 
 
-def _choose_center(mask: np.ndarray, distance: np.ndarray, major: np.ndarray) -> tuple[int, int]:
+def _choose_center(
+    mask: np.ndarray, distance: np.ndarray, major: np.ndarray
+) -> tuple[tuple[int, int], np.ndarray]:
     ys, xs = np.nonzero(mask)
     points = np.column_stack((xs, ys)).astype(np.float64)
     projection = points @ major
     low, high = np.quantile(projection, (0.05, 0.95))
     if high - low < 2:
         index = int(np.argmax(distance[ys, xs]))
-        return int(xs[index]), int(ys[index])
+        return (int(xs[index]), int(ys[index])), major
 
     edges = np.linspace(low, high, 22)
     centers: list[tuple[int, int]] = []
@@ -50,19 +52,30 @@ def _choose_center(mask: np.ndarray, distance: np.ndarray, major: np.ndarray) ->
     valid_indices = [index for index in range(4, 17) if radii[index] > 0]
     if not valid_indices:
         index = int(np.argmax(distance[ys, xs]))
-        return int(xs[index]), int(ys[index])
+        return (int(xs[index]), int(ys[index])), major
 
-    left_radius = np.median([radii[index] for index in valid_indices[:3]])
-    right_radius = np.median([radii[index] for index in valid_indices[-3:]])
-    if left_radius < right_radius * 0.8:
-        target = 6
-    elif right_radius < left_radius * 0.8:
-        target = 14
-    else:
-        target = 10
-    nearby = [index for index in valid_indices if abs(index - target) <= 2]
-    chosen = max(nearby or valid_indices, key=lambda index: radii[index])
-    return centers[chosen]
+    # Use a three-slice median so a small notch or mask defect cannot become
+    # the grasp site. Among similarly thin slices, prefer the object middle.
+    smoothed = {}
+    for index in valid_indices:
+        neighborhood = [radii[item] for item in range(max(0, index - 1), min(21, index + 2))
+                        if radii[item] > 0]
+        smoothed[index] = float(np.median(neighborhood))
+    minimum = min(smoothed.values())
+    comparable = [index for index in valid_indices if smoothed[index] <= minimum * 1.15]
+    chosen = min(comparable, key=lambda index: abs(index - 10))
+
+    # Re-estimate orientation from a local slab around the selected handle
+    # segment. A large wrench head should not rotate the closing direction.
+    slab_low = edges[max(0, chosen - 2)]
+    slab_high = edges[min(21, chosen + 3)]
+    slab_points = points[(projection >= slab_low) & (projection < slab_high)]
+    local_major = major
+    if len(slab_points) >= 20:
+        values, vectors = np.linalg.eigh(np.cov(slab_points, rowvar=False))
+        local_major = vectors[:, int(np.argmax(values))]
+        local_major /= max(np.linalg.norm(local_major), 1e-9)
+    return centers[chosen], local_major
 
 
 def geometry_maps(mask: np.ndarray, opening_scale: float = 1.15) -> dict[str, np.ndarray]:
@@ -80,9 +93,9 @@ def geometry_maps(mask: np.ndarray, opening_scale: float = 1.15) -> dict[str, np
 
     distance = cv2.distanceTransform(binary.astype(np.uint8), cv2.DIST_L2, 5)
     major, anisotropy = _principal_axis(binary)
-    center_x, center_y = _choose_center(binary, distance, major)
+    (center_x, center_y), local_major = _choose_center(binary, distance, major)
 
-    closing = np.array((-major[1], major[0]))
+    closing = np.array((-local_major[1], local_major[0]))
     theta = np.arctan2(-closing[1], closing[0])
     theta = (theta + np.pi / 2) % np.pi - np.pi / 2
     local_radius = max(float(distance[center_y, center_x]), 1.0)
