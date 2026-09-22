@@ -180,6 +180,20 @@ def draw_grasp_box(image, center, angle_deg, width_px, q=None, color=(0, 255, 0)
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
 
+def image_principal_axis(mask):
+    """Return the image-plane long-axis angle (radians) of a binary mask, or None."""
+    binary = np.asarray(mask, dtype=bool)
+    ys, xs = np.nonzero(binary)
+    if xs.size < 30:
+        return None
+    coords = np.column_stack((xs, ys)).astype(np.float64)
+    values, vectors = np.linalg.eigh(np.cov(coords, rowvar=False))
+    if values[0] <= 0 or values[1] / values[0] < 2.0:
+        return None
+    axis = vectors[:, 1]
+    return float(np.arctan2(axis[1], axis[0]))
+
+
 def set_detector_prompt(detector, prompt):
     """Update the text prompt used by the resident detector engine."""
     detector.prompt = prompt
@@ -488,7 +502,13 @@ def main():
                 hi_disp = detector.draw(hi_color, res_hi)
                 if (res_hi is not None and res_hi.get("grasp_angle_deg") is not None
                         and res_hi.get("grasp_width_px") is not None):
-                    draw_grasp_box(hi_disp, res_hi["center"], res_hi["grasp_angle_deg"],
+                    draw_angle_deg = res_hi["grasp_angle_deg"]
+                    if (args.grconvnet_angle_source == "axis"
+                            and res_hi.get("mask") is not None):
+                        axis = image_principal_axis(res_hi["mask"])
+                        if axis is not None:
+                            draw_angle_deg = float(np.degrees(axis + np.pi / 2.0))
+                    draw_grasp_box(hi_disp, res_hi["center"], draw_angle_deg,
                                    res_hi["grasp_width_px"], res_hi.get("grasp_q"))
                 hi_gate = gate_detection(res_hi, hi_status, "D435I")
                 if hi_handle_reason is not None and hi_handle is None:
@@ -514,26 +534,33 @@ def main():
                                 _, point_base_mm = robot.camera_to_base(
                                     point_camera_mm, tcp_pose=tcp_pose)
                                 return np.asarray(point_base_mm, dtype=np.float64) / 1000.0
-                            if (args.enable_angle_rotation or args.show_angle) and grasp_angle_deg is not None:
-                                rad = np.radians(grasp_angle_deg)
-                                u0, v0 = res_hi["center"]
-                                z0 = float(res_hi["z_mm"]) / 1000.0
-                                du = np.cos(rad) * 30.0
-                                dv = np.sin(rad) * 30.0
-                                p0 = hi_pixel_to_base(int(u0), int(v0), z0)
-                                p1 = hi_pixel_to_base(int(round(u0 + du)), int(round(v0 + dv)), z0)
-                                closing_base = float(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]) % np.pi)
-                                current_axis = float(
-                                    (closing_base - np.radians(args.grconvnet_angle_offset_deg)) % np.pi)
-                                angle_history.append(current_axis)
-                                current_orientation = overhead_orientation(
-                                    current_axis, tcp_pose[3:6], TOOL_ORIENTATION)
-                            elif (args.enable_angle_rotation or args.show_angle) and tool_category in (
-                                    "screwdriver", "adjustable wrench", "rubber mallet",
-                                    "tape dispenser"):
-                                current_axis, angle_reason = principal_axis_base(
-                                    res_hi["mask"], hi_depth * robot.camera.scale,
-                                    hi_pixel_to_base)
+                            if args.enable_angle_rotation or args.show_angle:
+                                current_axis = None
+                                angle_reason = None
+                                use_axis = (grasp_proposer is not None
+                                            and args.grconvnet_angle_source == "axis")
+                                if use_axis and res_hi.get("mask") is not None:
+                                    current_axis, angle_reason = principal_axis_base(
+                                        res_hi["mask"], hi_depth * robot.camera.scale,
+                                        hi_pixel_to_base)
+                                if current_axis is None and grasp_angle_deg is not None:
+                                    rad = np.radians(grasp_angle_deg)
+                                    u0, v0 = res_hi["center"]
+                                    z0 = float(res_hi["z_mm"]) / 1000.0
+                                    du = np.cos(rad) * 30.0
+                                    dv = np.sin(rad) * 30.0
+                                    p0 = hi_pixel_to_base(int(u0), int(v0), z0)
+                                    p1 = hi_pixel_to_base(int(round(u0 + du)), int(round(v0 + dv)), z0)
+                                    closing_base = float(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]) % np.pi)
+                                    current_axis = float(
+                                        (closing_base - np.radians(args.grconvnet_angle_offset_deg)) % np.pi)
+                                if (current_axis is None and grasp_angle_deg is None
+                                        and tool_category in (
+                                            "screwdriver", "adjustable wrench", "rubber mallet",
+                                            "tape dispenser")):
+                                    current_axis, angle_reason = principal_axis_base(
+                                        res_hi["mask"], hi_depth * robot.camera.scale,
+                                        hi_pixel_to_base)
                                 if current_axis is not None:
                                     angle_history.append(current_axis)
                                     current_orientation = overhead_orientation(
@@ -1688,6 +1715,8 @@ def parse_args():
                    help="目标框外扩比例，用于 GR-ConvNet 输入裁剪")
     p.add_argument("--grconvnet-angle-offset-deg", type=float, default=90.0,
                    help="GR-ConvNet 抓取角与夹爪闭合轴之间的偏置（度）")
+    p.add_argument("--grconvnet-angle-source", choices=("model", "axis"), default="axis",
+                   help="角度来源：model=GR-ConvNet 输出；axis=物体主轴(横跨手柄，推荐)")
     p.add_argument("--grconvnet-mask-weight", type=float, default=0.7,
                    help="距离变换加权强度(0~1)，越大越偏向物体较厚处")
     p.add_argument("--grconvnet-thickness-gate", type=float, default=0.4,
