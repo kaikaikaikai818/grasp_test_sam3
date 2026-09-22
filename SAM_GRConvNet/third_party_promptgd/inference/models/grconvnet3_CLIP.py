@@ -18,7 +18,10 @@ class ClipModel(nn.Module):
     def forward(self, text):
         ls = []
         for a in text:
-            a = self.model.encode_text(a.squeeze(0))
+            # ``a`` is [word_count, context_length].  squeeze(0) removed the
+            # batch dimension for a one-word prompt and made CLIP receive a
+            # 1-D token tensor.  CLIP always expects a 2-D token batch.
+            a = self.model.encode_text(a)
             ls.append(a)
             
         assert len(ls) == text.shape[0]
