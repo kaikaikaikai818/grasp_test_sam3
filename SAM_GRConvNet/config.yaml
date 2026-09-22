@@ -12,6 +12,7 @@ sam:
   complete_object: true
   sam_score_tolerance: 0.12
   max_mask_fraction: 0.70
+  overlap_merge: 0.20
 
 grasp:
   backend: geometry

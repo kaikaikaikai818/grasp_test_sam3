@@ -66,11 +66,45 @@ class SamObject:
     sam_score: float
 
 
+def merge_overlapping_objects(
+    objects: list[SamObject], overlap_threshold: float = 0.20
+) -> list[SamObject]:
+    """Merge duplicate SAM proposals for different parts of one object.
+
+    The overlap coefficient uses the smaller mask as denominator, so a wrench
+    head contained in a whole-handle proposal is treated as a duplicate while
+    separate tools remain separate.
+    """
+    if not 0.0 <= overlap_threshold <= 1.0:
+        raise ValueError("overlap_threshold must be between 0 and 1")
+    merged: list[SamObject] = []
+    for candidate in sorted(objects, key=lambda item: int(item.mask.sum()), reverse=True):
+        duplicate_index = None
+        for index, existing in enumerate(merged):
+            intersection = int(np.logical_and(candidate.mask, existing.mask).sum())
+            smaller = min(int(candidate.mask.sum()), int(existing.mask.sum()))
+            if smaller and intersection / smaller >= overlap_threshold:
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            merged.append(candidate)
+            continue
+        existing = merged[duplicate_index]
+        union = np.logical_or(existing.mask, candidate.mask)
+        merged[duplicate_index] = SamObject(
+            union,
+            _mask_box(union),
+            max(existing.clipseg_score, candidate.clipseg_score),
+            max(existing.sam_score, candidate.sam_score),
+        )
+    return merged
+
+
 class SamPipeline:
     def __init__(self, checkpoint, clipseg_model, device="cuda", threshold=0.3,
                  min_area=100, min_score=0.35, max_objects=10,
                  complete_object=True, sam_score_tolerance=0.12,
-                 max_mask_fraction=0.70):
+                 max_mask_fraction=0.70, overlap_merge=0.20):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("MobileSAM requires CUDA")
@@ -81,6 +115,7 @@ class SamPipeline:
         self.complete_object = bool(complete_object)
         self.sam_score_tolerance = float(sam_score_tolerance)
         self.max_mask_fraction = float(max_mask_fraction)
+        self.overlap_merge = float(overlap_merge)
         model_path = Path(clipseg_model)
         if not model_path.is_dir():
             raise FileNotFoundError(f"CLIPSeg model directory not found: {model_path}")
@@ -145,4 +180,4 @@ class SamPipeline:
                 best = int(np.argmax(scores))
                 mask, sam_score = masks[best], float(scores[best])
             objects.append(SamObject(mask, _mask_box(mask), clip_score, sam_score))
-        return objects
+        return merge_overlapping_objects(objects, self.overlap_merge)

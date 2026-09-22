@@ -36,6 +36,7 @@ def build_models(config: dict):
         complete_object=sam_cfg.get("complete_object", True),
         sam_score_tolerance=sam_cfg.get("sam_score_tolerance", 0.12),
         max_mask_fraction=sam_cfg.get("max_mask_fraction", 0.70),
+        overlap_merge=sam_cfg.get("overlap_merge", 0.20),
     )
     backend = grasp_cfg.get("backend", "geometry")
     if backend != "geometry":

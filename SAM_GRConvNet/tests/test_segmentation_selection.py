@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from segmentation.pipeline import select_complete_mask
+from segmentation.pipeline import SamObject, merge_overlapping_objects, select_complete_mask
 
 
 class CompleteMaskSelectionTests(unittest.TestCase):
@@ -27,6 +27,34 @@ class CompleteMaskSelectionTests(unittest.TestCase):
         selected, _ = select_complete_mask(masks, scores, (9, 5))
 
         np.testing.assert_array_equal(selected, masks[0])
+
+    def test_merges_overlapping_part_and_whole_proposals(self):
+        whole = np.zeros((30, 20), dtype=bool)
+        whole[3:27, 7:13] = True
+        part = np.zeros_like(whole)
+        part[3:10, 6:14] = True
+        objects = [
+            SamObject(whole, (7, 3, 13, 27), 0.7, 0.8),
+            SamObject(part, (6, 3, 14, 10), 0.8, 0.9),
+        ]
+
+        merged = merge_overlapping_objects(objects)
+
+        self.assertEqual(len(merged), 1)
+        np.testing.assert_array_equal(merged[0].mask, np.logical_or(whole, part))
+
+    def test_keeps_separate_non_overlapping_tools(self):
+        left = np.zeros((20, 30), dtype=bool)
+        right = np.zeros_like(left)
+        left[4:16, 2:8] = True
+        right[4:16, 22:28] = True
+
+        merged = merge_overlapping_objects([
+            SamObject(left, (2, 4, 8, 16), 0.8, 0.9),
+            SamObject(right, (22, 4, 28, 16), 0.8, 0.9),
+        ])
+
+        self.assertEqual(len(merged), 2)
 
 
 if __name__ == "__main__":
