@@ -58,6 +58,8 @@ from bsp.camera_bsp.screwdriver_grasp import (estimate_handle_thickness,
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
 TEXT_PROMPT = "a screwdriver"       # 修改这里选择要寻找的工具
+TOOL_CYCLE = ["a screwdriver", "a wrench", "scissors", "a tape measure",
+              "a tape dispenser", "a rubber mallet"]   # [ / ] 键循环切换
 ENABLE_ROBOT_GRASP = False      # 完成纯视觉坐标验收后才改为 True
 # 螺丝刀实际夹持：仅在完成深度标定、P 和 D 后按 R 才会执行；默认关闭。
 ENABLE_SCREWDRIVER_GRASP = True
@@ -153,6 +155,39 @@ GRIP_TORQUE_MIN = 80          # 实时力矩(0x060C)阈值: 低于此且力矩�
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
 
+def draw_grasp_box(image, center, angle_deg, width_px, q=None, color=(0, 255, 0)):
+    """Overlay the GR-ConvNet grasp rectangle (opening along the grasp angle)."""
+    u, v = int(center[0]), int(center[1])
+    angle = np.radians(angle_deg)
+    depth_px = max(width_px * 0.6, 12.0)
+    dx, dy = np.cos(angle), np.sin(angle)
+    px, py = -np.sin(angle), np.cos(angle)
+    half_len, half_depth = width_px / 2.0, depth_px / 2.0
+    corners = np.array([
+        [u - half_len * dx - half_depth * px, v - half_len * dy - half_depth * py],
+        [u + half_len * dx - half_depth * px, v + half_len * dy - half_depth * py],
+        [u + half_len * dx + half_depth * px, v + half_len * dy + half_depth * py],
+        [u - half_len * dx + half_depth * px, v - half_len * dy + half_depth * py],
+    ], dtype=np.int32)
+    cv2.polylines(image, [corners], True, color, 2, cv2.LINE_AA)
+    tip = (int(round(u + half_len * 1.3 * dx)), int(round(v + half_len * 1.3 * dy)))
+    cv2.arrowedLine(image, (u, v), tip, (0, 255, 255), 2, tipLength=0.25)
+    cv2.circle(image, (u, v), 4, (0, 0, 255), -1)
+    label = "GRASP %.0fdeg w=%.0f" % (angle_deg, width_px)
+    if q is not None:
+        label += " q=%.2f" % q
+    cv2.putText(image, label, (max(0, u - 70), max(18, v - 16)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+
+def set_detector_prompt(detector, prompt):
+    """Update the text prompt used by the resident detector engine."""
+    detector.prompt = prompt
+    engine = getattr(detector, "engine", None)
+    if engine is not None and hasattr(engine, "prompt"):
+        engine.prompt = prompt
+
+
 def _sample_center_depth(depth_raw, depth_scale, center, win=5):
     """Median valid depth (metres) in a small window around a pixel, or None."""
     height, width = depth_raw.shape[:2]
@@ -175,6 +210,7 @@ def main():
         TEXT_PROMPT = args.prompt
     TEXT_PROMPT = normalize_prompt(TEXT_PROMPT)
     tool_category = known_category(TEXT_PROMPT)
+    cycle_index = TOOL_CYCLE.index(TEXT_PROMPT) if TEXT_PROMPT in TOOL_CYCLE else 0
     # Every run starts locked. The requested stage explicitly opens only the
     # capabilities needed for that validation step.
     ENABLE_ROBOT_GRASP = False
@@ -337,6 +373,7 @@ def main():
     print("  t -> 抓取成功后：垂直抬到安全搬运高度，再恢复初始标准角度")
     print("  o -> 抓取后松开，再抬升10mm并自动恢复初始角度")
     print("  c -> 夹爪闭合     q -> 退出")
+    print("  [ / ] -> 切换工具: %s" % " / ".join(TOOL_CYCLE))
     print("  坐标验收: 1中心  2左侧  3右侧  4上方  5下方")
     print("  本次测量文件:", validation_log)
 
@@ -426,6 +463,7 @@ def main():
                         res_hi["center"] = proposal["center"]
                         res_hi["grasp_angle_deg"] = proposal["angle_deg"]
                         res_hi["grasp_width_px"] = proposal["width_px"]
+                        res_hi["grasp_q"] = proposal["q"]
                         grasp_angle_deg = proposal["angle_deg"]
                         grasp_width_px = proposal["width_px"]
                         center_z = _sample_center_depth(
@@ -448,6 +486,10 @@ def main():
                         res_hi["center"] = candidate.center_px
                         res_hi["z_mm"] = candidate.depth_m * 1000.0
                 hi_disp = detector.draw(hi_color, res_hi)
+                if (res_hi is not None and res_hi.get("grasp_angle_deg") is not None
+                        and res_hi.get("grasp_width_px") is not None):
+                    draw_grasp_box(hi_disp, res_hi["center"], res_hi["grasp_angle_deg"],
+                                   res_hi["grasp_width_px"], res_hi.get("grasp_q"))
                 hi_gate = gate_detection(res_hi, hi_status, "D435I")
                 if hi_handle_reason is not None and hi_handle is None:
                     hi_gate = {"passed": False, "reasons": [hi_handle_reason]}
@@ -686,6 +728,17 @@ def main():
                 hi_filter.reset()
                 print("[位置标记] %s：已清空旧稳定历史，等待两台相机重新 STABLE + PASS。"
                       % active_position)
+            elif key in (ord('['), ord(']')):
+                step = 1 if key == ord(']') else -1
+                cycle_index = (cycle_index + step) % len(TOOL_CYCLE)
+                new_prompt = TOOL_CYCLE[cycle_index]
+                TEXT_PROMPT = new_prompt
+                set_detector_prompt(detector, new_prompt)
+                tool_category = known_category(new_prompt)
+                ho_filter.reset()
+                hi_filter.reset()
+                angle_history.clear()
+                print("[切换工具] -> %s（已重置稳定历史）" % new_prompt)
             elif key == ord('o'):
                 if gripper_enabled:
                     released_completed_grasp = grasp_completed
