@@ -43,6 +43,8 @@ from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
 from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
+from bsp.camera_bsp.grconvnet_grasp import (GrConvNetGrasp,
+                                            DEFAULT_WEIGHTS as GRCONVNET_DEFAULT_WEIGHTS)
 from bsp.camera_bsp.tool_profiles import load_tool_profile
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
@@ -151,6 +153,20 @@ GRIP_TORQUE_MIN = 80          # 实时力矩(0x060C)阈值: 低于此且力矩�
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
 
+def _sample_center_depth(depth_raw, depth_scale, center, win=5):
+    """Median valid depth (metres) in a small window around a pixel, or None."""
+    height, width = depth_raw.shape[:2]
+    u, v = int(center[0]), int(center[1])
+    half = int(win) // 2
+    u0, u1 = max(0, u - half), min(width, u + half + 1)
+    v0, v1 = max(0, v - half), min(height, v + half + 1)
+    patch = depth_raw[v0:v1, u0:u1].astype(np.float32) * float(depth_scale)
+    valid = patch[patch > 0]
+    if valid.size == 0:
+        return None
+    return float(np.median(valid))
+
+
 def main():
     global TEXT_PROMPT, ENABLE_ROBOT_GRASP, ENABLE_SAFE_APPROACH_TEST
     global ENABLE_SAFE_DESCENT_TEST, ENABLE_SCREWDRIVER_GRASP, ENABLE_ONE_KEY_GRASP
@@ -243,6 +259,16 @@ def main():
 
     detector = SamToolDetector(TEXT_PROMPT, checkpoint=args.checkpoint,
                                backend=args.backend)
+    grasp_proposer = None
+    if args.grasp_backend == "grconvnet":
+        grasp_proposer = GrConvNetGrasp(
+            weights=(args.grconvnet_weights or GRCONVNET_DEFAULT_WEIGHTS),
+            padding=args.grconvnet_padding,
+            mask_weight=args.grconvnet_mask_weight,
+            thickness_gate=args.grconvnet_thickness_gate)
+        print("[抓取后端] grconvnet | 权重:", grasp_proposer.weights)
+    else:
+        print("[抓取后端] geometry（默认几何法）")
     ho_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
     hi_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
     angle_history = deque(maxlen=3)
@@ -381,6 +407,8 @@ def main():
             tcp_pose = None
             hi_handle = None
             hi_handle_reason = None
+            grasp_angle_deg = None
+            grasp_width_px = None
             current_support_plane = None
             support_plane_reason = None
             current_axis = None
@@ -389,7 +417,24 @@ def main():
             if hi_color is not None:
                 raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
                 res_hi, hi_status = hi_filter.update(raw_hi)
-                if (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_hi is not None
+                if res_hi is not None and hi_status == "STABLE" and grasp_proposer is not None:
+                    proposal, grasp_reason = grasp_proposer.propose(
+                        hi_color, hi_depth, robot.camera.scale, res_hi["box"],
+                        mask=res_hi.get("mask"))
+                    if proposal is not None:
+                        res_hi = dict(res_hi)
+                        res_hi["center"] = proposal["center"]
+                        res_hi["grasp_angle_deg"] = proposal["angle_deg"]
+                        res_hi["grasp_width_px"] = proposal["width_px"]
+                        grasp_angle_deg = proposal["angle_deg"]
+                        grasp_width_px = proposal["width_px"]
+                        center_z = _sample_center_depth(
+                            hi_depth, robot.camera.scale, proposal["center"])
+                        if center_z is not None:
+                            res_hi["z_mm"] = center_z * 1000.0
+                    else:
+                        hi_handle_reason = "grconvnet: %s" % grasp_reason
+                elif (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_hi is not None
                         and hi_status == "STABLE"):
                     hi_handle, hi_handle_reason = find_screwdriver_handle(
                         res_hi, hi_depth, robot.camera.scale)
@@ -427,7 +472,21 @@ def main():
                                 _, point_base_mm = robot.camera_to_base(
                                     point_camera_mm, tcp_pose=tcp_pose)
                                 return np.asarray(point_base_mm, dtype=np.float64) / 1000.0
-                            if (args.enable_angle_rotation or args.show_angle) and tool_category in (
+                            if (args.enable_angle_rotation or args.show_angle) and grasp_angle_deg is not None:
+                                rad = np.radians(grasp_angle_deg)
+                                u0, v0 = res_hi["center"]
+                                z0 = float(res_hi["z_mm"]) / 1000.0
+                                du = np.cos(rad) * 30.0
+                                dv = np.sin(rad) * 30.0
+                                p0 = hi_pixel_to_base(int(u0), int(v0), z0)
+                                p1 = hi_pixel_to_base(int(round(u0 + du)), int(round(v0 + dv)), z0)
+                                closing_base = float(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]) % np.pi)
+                                current_axis = float(
+                                    (closing_base - np.radians(args.grconvnet_angle_offset_deg)) % np.pi)
+                                angle_history.append(current_axis)
+                                current_orientation = overhead_orientation(
+                                    current_axis, tcp_pose[3:6], TOOL_ORIENTATION)
+                            elif (args.enable_angle_rotation or args.show_angle) and tool_category in (
                                     "screwdriver", "adjustable wrench", "rubber mallet",
                                     "tape dispenser"):
                                 current_axis, angle_reason = principal_axis_base(
@@ -439,7 +498,7 @@ def main():
                                         current_axis, tcp_pose[3:6], TOOL_ORIENTATION)
                                 else:
                                     angle_history.clear()
-                            if tool_category is not None:
+                            if tool_category is not None or grasp_proposer is not None:
                                 current_support_plane, support_plane_reason = fit_horizontal_support_plane(
                                     hi_depth, robot.camera.scale, hi_pixel_to_base,
                                     exclude_mask=res_hi.get("mask"))
@@ -476,6 +535,10 @@ def main():
             if hi_handle is not None:
                 handle_thickness, _ = estimate_handle_thickness(
                     hi_handle.radius_px, hi_handle.depth_m,
+                    float(robot.cam_intrinsics[0, 0]))
+            elif grasp_width_px is not None and res_hi is not None and res_hi.get("z_mm") is not None:
+                handle_thickness, _ = estimate_handle_thickness(
+                    grasp_width_px / 2.0, float(res_hi["z_mm"]) / 1000.0,
                     float(robot.cam_intrinsics[0, 0]))
             grasp_preview = build_grasp_preview(
                 state["hi_base"], hi_gate, observation_active,
@@ -1563,6 +1626,19 @@ def parse_args():
     p.add_argument("--backend", choices=("clipseg_mobilesam", "yoloe"),
                    default="clipseg_mobilesam", help="local segmentation backend")
     p.add_argument("--checkpoint", help="override the selected backend's local weights")
+    p.add_argument("--grasp-backend", choices=("geometry", "grconvnet"),
+                   default="geometry",
+                   help="抓取候选来源：geometry(默认几何法) 或 grconvnet(GR-ConvNet)")
+    p.add_argument("--grconvnet-weights", default=None,
+                   help="GR-ConvNet state_dict 路径（默认 weights/grconvnet/cornell_rgbd_ch32.pt）")
+    p.add_argument("--grconvnet-padding", type=float, default=1.3,
+                   help="目标框外扩比例，用于 GR-ConvNet 输入裁剪")
+    p.add_argument("--grconvnet-angle-offset-deg", type=float, default=90.0,
+                   help="GR-ConvNet 抓取角与夹爪闭合轴之间的偏置（度）")
+    p.add_argument("--grconvnet-mask-weight", type=float, default=0.7,
+                   help="距离变换加权强度(0~1)，越大越偏向物体较厚处")
+    p.add_argument("--grconvnet-thickness-gate", type=float, default=0.4,
+                   help="抓取点必须落在物体厚度达到该比例的区域内(0=关闭)")
     p.add_argument("--stage", choices=("vision", "observe", "rotate", "descent",
                                        "grasp", "place"), default="vision",
                    help="explicit validation stage; default vision sends no motion commands")
