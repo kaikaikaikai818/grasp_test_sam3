@@ -1,0 +1,19 @@
+environment:
+  expected_gpu: NVIDIA GeForce RTX 3060 Ti
+
+sam:
+  checkpoint: ../weights/mobile_sam.pt
+  clipseg_model: ../weights/clipseg-rd64-refined
+  device: cuda
+  threshold: 0.30
+  min_area: 100
+  min_score: 0.35
+  max_objects: 10
+  complete_object: true
+  sam_score_tolerance: 0.12
+  max_mask_fraction: 0.70
+
+grasp:
+  checkpoint: weights/grconvnet_clip_promptgd.pt
+  input_size: 224
+  device: cuda

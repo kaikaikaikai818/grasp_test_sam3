@@ -1,0 +1,12 @@
+local_deps/
+.venv/
+weights/
+outputs/
+vendor/
+__pycache__/
+*.zip
+/run_image_legacy.py
+/requirements_legacy.txt
+/setup_3060_legacy.bat
+/test_fusion.py
+/demo_3060.bat
