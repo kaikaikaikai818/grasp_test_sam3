@@ -16,7 +16,9 @@ sam:
 
 recognition:
   min_target_score: 0.35
-  min_margin: 0.03
+  # CLIPSeg category probabilities are not calibrated like classifier scores.
+  # Keep a small tie-break margin during the no-training validation stage.
+  min_margin: 0.01
   top_fraction: 0.25
   categories:
     adjustable_wrench:

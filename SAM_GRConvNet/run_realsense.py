@@ -61,6 +61,14 @@ def main():
                     f"语义通过 {metadata['semantic_accepted_count']}，"
                     f"安全抓取 {metadata['accepted_object_count']}"
                 )
+                for index, item in enumerate(objects, 1):
+                    state = "PASS" if item.semantic_accepted else "REJECT"
+                    detail = f" | {item.rejection_reason}" if item.rejection_reason else ""
+                    print(
+                        f"  #{index} {state}: {item.target_class}={item.target_score:.3f}, "
+                        f"vs {item.competing_class}={item.competing_score:.3f}, "
+                        f"margin={item.semantic_margin:.3f}{detail}"
+                    )
     finally:
         pipeline.stop()
         cv2.destroyAllWindows()
