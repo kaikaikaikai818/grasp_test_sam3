@@ -1,0 +1,2 @@
+ur-rtde==1.6.5
+minimalmodbus==2.1.1

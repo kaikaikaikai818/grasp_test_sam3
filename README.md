@@ -46,6 +46,14 @@ outputs\图片名称\
 
 当前环境要求 NVIDIA CUDA，MobileSAM 权重位于 `weights/mobile_sam.pt`。
 
+## 螺丝刀双相机一致性验证
+
+需要进入机器人项目验证已有标定时，双击根目录的 `screwdriver_workflow.bat`。
+菜单会依次引导完成两轮五位置静止采集、候选补偿和独立验收。生成的
+`ur5_grasp-main/camera_alignment.json` 绑定两台相机、分辨率及三份核心标定
+文件，所有工具共用一次验证结果；换工具不需要重做。菜单 1 到 4 不发送机器人
+运动或夹爪命令，菜单 5 才开放按键触发的 250 mm 以上高位观察点测试。
+
 ## RealSense 输出
 
 ```text

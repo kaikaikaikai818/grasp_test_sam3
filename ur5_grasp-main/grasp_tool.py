@@ -39,7 +39,9 @@ from bsp.robot_bsp.fixed_placement import (load_placement, place_at_fixed_point,
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
-from bsp.camera_bsp.camera_alignment import apply_alignment, load_alignment
+from bsp.camera_bsp.camera_alignment import (apply_alignment,
+                                              build_calibration_context,
+                                              load_alignment)
 from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
@@ -231,15 +233,22 @@ def main():
     ho = HandOutEyeCalibration(robot=ParamHolder(), calib_path=CALIB_PATH,
                                cam_depth_scale=depth_scale)
     print("[OK] 手外标定加载完成 (camera_pose.txt, cam->base, 米)")
+    calibration_context = build_calibration_context(
+        getattr(ho_cam, "connected_serial", None),
+        getattr(robot.camera, "connected_serial", None),
+        (ho_cam.im_width, ho_cam.im_height),
+        (robot.camera.im_width, robot.camera.im_height),
+        CALIB_PATH, CAM2END_PATH, CAM_INI)
     try:
-        camera_alignment = load_alignment(CAMERA_ALIGNMENT_PATH)
+        camera_alignment = load_alignment(
+            CAMERA_ALIGNMENT_PATH, calibration_context, require_validated=True)
     except Exception as exc:
         camera_alignment = None
-        print("[校正文件无效] 使用D455原始坐标：%s" % exc)
+        print("[一致性验证锁定] 使用D455原始坐标，仅允许静止采集：%s" % exc)
     if camera_alignment is None:
-        print("[双相机校正] 未加载，目标关联使用D455原始坐标。")
+        print("[双相机一致性] 未加载已验收文件；observe及后续运动保持锁定。")
     else:
-        print("[双相机校正] 已加载:", CAMERA_ALIGNMENT_PATH)
+        print("[双相机一致性] 已通过独立验收并加载:", CAMERA_ALIGNMENT_PATH)
 
     detector = SamToolDetector(TEXT_PROMPT, checkpoint=args.checkpoint,
                                backend=args.backend)
@@ -270,6 +279,7 @@ def main():
     safe_descent_completed = False
     grasp_completed = False
     orientation_return_completed = False
+    cross_camera_mismatch_latched = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -455,6 +465,14 @@ def main():
             association = associate_targets(
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
                 alignment_applied=camera_alignment is not None)
+            if (camera_alignment is not None and association.get("available")
+                    and association.get("distance_m") is not None
+                    and float(association["distance_m"])
+                    > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M):
+                if not cross_camera_mismatch_latched:
+                    print("[安全锁定] 双相机实时坐标差超过15mm；本次运行不再允许运动，请检查目标对应和相机安装。")
+                cross_camera_mismatch_latched = True
+            association["runtime_mismatch_latched"] = cross_camera_mismatch_latched
             state["association"] = association
             if current_axis is None:
                 angle_history.clear()
@@ -467,7 +485,8 @@ def main():
             else:
                 approach_ready_streak = 0
             coarse_destination, coarse_reason = coarse_approach_candidate(
-                state["ho_base_aligned"], ho_gate, camera_alignment is not None)
+                state["ho_base_aligned"], ho_gate, camera_alignment is not None,
+                association=association)
             if ENABLE_SAFE_APPROACH_TEST and coarse_destination is not None:
                 coarse_ready_streak += 1
             else:
@@ -862,6 +881,8 @@ def safe_approach_candidate(association):
     """
     if not association or not association.get("available"):
         return None, "waiting for both cameras"
+    if association.get("runtime_mismatch_latched"):
+        return None, "cross-camera mismatch latched; restart after inspection"
     if not association.get("alignment_applied"):
         return None, "camera alignment file not loaded"
     if not association.get("matched"):
@@ -881,7 +902,8 @@ def safe_approach_candidate(association):
     return destination.tolist(), None
 
 
-def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied):
+def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied,
+                              association=None):
     """Build a D455-only coarse observation pose when the wrist camera cannot see the tool.
 
     Used at startup, before the arm has moved, so the wrist D435i has no target
@@ -893,6 +915,14 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied):
         return None, "waiting for stable D455 target"
     if not alignment_applied:
         return None, "camera alignment file not loaded"
+    if association and association.get("runtime_mismatch_latched"):
+        return None, "cross-camera mismatch latched; restart after inspection"
+    if (association and association.get("available")
+            and association.get("distance_m") is not None
+            and float(association["distance_m"])
+            > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M):
+        return None, "live cross-camera delta exceeds %.0fmm" % (
+            SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0)
     target = np.asarray(ho_base_aligned, dtype=np.float64)
     if not point_in_workspace(target):
         return None, "D455 target outside workspace"
@@ -1140,11 +1170,20 @@ def check_calib(robot, ho_cam):
     live = ho_cam.intrinsics
     exp = np.array([[HO_FX, 0, HO_CX], [0, HO_FY, HO_CY], [0, 0, 1]])
     dho = max_intrinsics_delta(live, exp)
+    connected_ho_serial = getattr(ho_cam, "connected_serial", None)
     print("手外D455 实时 fx=%.3f fy=%.3f cx=%.3f cy=%.3f | 期望=%.3f/%.3f/%.3f/%.3f | Δmax=%.3f px"
           % (live[0, 0], live[1, 1], live[0, 2], live[1, 2],
              exp[0, 0], exp[1, 1], exp[0, 2], exp[1, 2], dho))
     if not np.all(np.isfinite(live)):
         print("[自检失败] 手外D455 实时内参包含非有限值。")
+        ok = False
+    elif connected_ho_serial != HO_SERIAL:
+        print("[自检失败] 手外相机序列号不符(实际=%s，期望=%s)。"
+              % (connected_ho_serial or "未知", HO_SERIAL))
+        ok = False
+    elif (ho_cam.im_width, ho_cam.im_height) != (640, 480):
+        print("[自检失败] 手外D455 图像流不是 640x480 (当前=%sx%s)。"
+              % (ho_cam.im_width, ho_cam.im_height))
         ok = False
     elif dho > D455_CALIB_TOL:
         print("[自检失败] 手外D455 内参与标定值不符(%.3f>%.1f)！"

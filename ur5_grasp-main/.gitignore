@@ -3,6 +3,7 @@ __pycache__/
 .idea/
 .vscode/
 grasp_surface_calibration.json
+camera_alignment.json
 fixed_placement.json
 tool_profiles.json
 .venv/
