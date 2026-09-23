@@ -15,43 +15,81 @@ sam:
   overlap_merge: 0.20
 
 recognition:
-  min_target_score: 0.35
-  # CLIPSeg category probabilities are not calibrated like classifier scores.
-  # Keep a small tie-break margin during the no-training validation stage.
+  min_similarity: 0.20
   min_margin: 0.01
-  top_fraction: 0.25
+  crop_padding: 0.10
   categories:
     adjustable_wrench:
-      prompt: adjustable wrench
+      localization_prompt: adjustable wrench
+      prompts:
+        - a photo of an adjustable wrench
+        - an adjustable wrench tool
+        - a hand tool called an adjustable wrench
       aliases: [wrench, wrench handle, adjustable wrench handle, 扳手, 活动扳手]
       graspable: true
     screwdriver:
-      prompt: screwdriver
+      localization_prompt: screwdriver
+      prompts:
+        - a photo of a screwdriver
+        - a screwdriver tool
+        - a hand tool called a screwdriver
       aliases: [screw driver, screwdriver handle, 螺丝刀, 改锥]
       graspable: true
     pliers:
-      prompt: pliers
+      localization_prompt: pliers
+      prompts:
+        - a photo of pliers
+        - a pair of pliers
+        - a hand tool called pliers
       aliases: [plier, 钳子, 老虎钳]
       graspable: true
     hammer:
-      prompt: hammer
+      localization_prompt: hammer
+      prompts:
+        - a photo of a hammer
+        - a hammer tool
+        - a hand tool called a hammer
       aliases: [hammer handle, 锤子, 榔头]
       graspable: true
     hex_key:
-      prompt: hex key
+      localization_prompt: hex key
+      prompts:
+        - a photo of a hex key
+        - an Allen key tool
+        - an L-shaped hex wrench
       aliases: [allen key, hex wrench, 内六角, 内六角扳手]
       graspable: true
     pen:
-      prompt: pen
+      localization_prompt: pen
+      prompts:
+        - a photo of a pen
+        - a writing pen
+        - a pencil or pen
       aliases: [pencil, 笔, 铅笔]
       graspable: false
     mobile_phone:
-      prompt: mobile phone
+      localization_prompt: mobile phone
+      prompts:
+        - a photo of a mobile phone
+        - a smartphone
+        - a rectangular cell phone
       aliases: [phone, smartphone, 手机]
       graspable: false
     box:
-      prompt: box
+      localization_prompt: box
+      prompts:
+        - a photo of a box
+        - a rectangular container
+        - a storage case
       aliases: [case, container, 盒子]
+      graspable: false
+    other_tool:
+      localization_prompt: other tool
+      prompts:
+        - a photo of another hand tool
+        - an unknown tool
+        - a miscellaneous object
+      aliases: [other tool, unknown tool]
       graspable: false
 
 grasp:

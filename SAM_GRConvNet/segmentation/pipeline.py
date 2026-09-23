@@ -72,12 +72,17 @@ class SamObject:
     semantic_accepted: bool = True
     rejection_reason: str | None = None
     class_scores: dict[str, float] = field(default_factory=dict)
+    predicted_class: str = ""
+    semantic_backend: str = "clip_cosine"
+    localization_prompt: str = ""
+    classification_prompts: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ToolCategory:
     name: str
-    prompt: str
+    localization_prompt: str
+    prompts: tuple[str, ...]
     aliases: tuple[str, ...]
     graspable: bool = True
 
@@ -89,11 +94,17 @@ def _normalise_text(value: str) -> str:
 def build_tool_catalog(raw_categories: dict | None) -> dict[str, ToolCategory]:
     catalog: dict[str, ToolCategory] = {}
     for name, raw in (raw_categories or {}).items():
-        prompt = str(raw.get("prompt", name.replace("_", " "))).strip()
-        aliases = tuple({_normalise_text(name), _normalise_text(prompt), *(
+        fallback = str(raw.get("prompt", name.replace("_", " "))).strip()
+        localization_prompt = str(raw.get("localization_prompt", fallback)).strip()
+        prompts = tuple(str(item).strip() for item in raw.get("prompts", [fallback]) if str(item).strip())
+        if not prompts:
+            raise ValueError(f"category {name!r} must define at least one CLIP prompt")
+        aliases = tuple({_normalise_text(name), _normalise_text(localization_prompt), *(
             _normalise_text(str(alias)) for alias in raw.get("aliases", [])
         )})
-        catalog[name] = ToolCategory(name, prompt, aliases, bool(raw.get("graspable", True)))
+        catalog[name] = ToolCategory(
+            name, localization_prompt, prompts, aliases, bool(raw.get("graspable", True))
+        )
     return catalog
 
 
@@ -107,38 +118,64 @@ def resolve_tool_request(text: str, catalog: dict[str, ToolCategory]) -> ToolCat
     ]
     matches = [(item, length) for item, length in (exact or contained) if item.graspable]
     if not matches:
-        supported = ", ".join(item.prompt for item in catalog.values() if item.graspable)
+        supported = ", ".join(item.localization_prompt for item in catalog.values() if item.graspable)
         raise ValueError(f"unsupported tool request: {text!r}; supported tools: {supported}")
     return max(matches, key=lambda pair: pair[1])[0]
 
 
-def masked_top_score(probability: np.ndarray, mask: np.ndarray, top_fraction: float) -> float:
-    values = np.asarray(probability, dtype=float)[np.asarray(mask, dtype=bool)]
-    if values.size == 0:
-        return 0.0
-    count = max(1, int(np.ceil(values.size * top_fraction)))
-    return float(np.partition(values, values.size - count)[-count:].mean())
+def normalize_feature_rows(features: np.ndarray) -> np.ndarray:
+    values = np.asarray(features, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError("features must be a two-dimensional matrix")
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    if np.any(norms <= 1e-12):
+        raise ValueError("cannot normalize a zero feature vector")
+    return values / norms
 
 
-def classify_mask(
-    score_maps: dict[str, np.ndarray], mask: np.ndarray, target_class: str,
-    min_score: float, min_margin: float, top_fraction: float,
+def masked_object_crop(
+    image_rgb: np.ndarray, mask: np.ndarray, padding_fraction: float = 0.10,
+    fill_value: int = 127,
+) -> Image.Image:
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    binary = np.asarray(mask, dtype=bool)
+    if image.ndim != 3 or image.shape[2] != 3 or binary.shape != image.shape[:2]:
+        raise ValueError("RGB image and mask dimensions differ")
+    x1, y1, x2, y2 = _mask_box(binary)
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("cannot crop an empty mask")
+    if padding_fraction < 0:
+        raise ValueError("padding_fraction must be non-negative")
+    pad_x = int(round((x2 - x1) * padding_fraction))
+    pad_y = int(round((y2 - y1) * padding_fraction))
+    x1, x2 = max(0, x1 - pad_x), min(image.shape[1], x2 + pad_x)
+    y1, y2 = max(0, y1 - pad_y), min(image.shape[0], y2 + pad_y)
+    crop = image[y1:y2, x1:x2].copy()
+    crop_mask = binary[y1:y2, x1:x2]
+    crop[~crop_mask] = np.uint8(np.clip(fill_value, 0, 255))
+    return Image.fromarray(crop)
+
+
+def classify_similarities(
+    similarities: dict[str, float], target_class: str,
+    min_similarity: float, min_margin: float,
 ) -> tuple[dict[str, float], bool, str | None]:
-    scores = {
-        name: masked_top_score(probability, mask, top_fraction)
-        for name, probability in score_maps.items()
-    }
+    if target_class not in similarities:
+        raise ValueError(f"target class {target_class!r} has no similarity score")
+    if len(similarities) < 2:
+        raise ValueError("at least two class similarities are required")
+    scores = {name: float(value) for name, value in similarities.items()}
     ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     winner, winner_score = ordered[0]
     target_score = scores[target_class]
     competitor_score = max((score for name, score in ordered if name != target_class), default=0.0)
-    if target_score < min_score:
-        return scores, False, f"target confidence {target_score:.3f} below {min_score:.3f}"
+    if target_score < min_similarity:
+        return scores, False, f"target cosine {target_score:.3f} below {min_similarity:.3f}"
     if winner != target_class:
         return scores, False, f"looks more like {winner} ({winner_score:.3f})"
     margin = target_score - competitor_score
     if margin < min_margin:
-        return scores, False, f"semantic margin {margin:.3f} below {min_margin:.3f}"
+        return scores, False, f"cosine margin {margin:.3f} below {min_margin:.3f}"
     return scores, True, None
 
 
@@ -181,8 +218,8 @@ class SamPipeline:
                  min_area=100, min_score=0.35, max_objects=10,
                  complete_object=True, sam_score_tolerance=0.12,
                  max_mask_fraction=0.70, overlap_merge=0.20,
-                 categories=None, semantic_min_score=0.35,
-                 semantic_min_margin=0.03, semantic_top_fraction=0.25):
+                 categories=None, semantic_min_similarity=0.20,
+                 semantic_min_margin=0.01, crop_padding=0.10):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("MobileSAM requires CUDA")
@@ -197,11 +234,11 @@ class SamPipeline:
         self.catalog = build_tool_catalog(categories)
         if len(self.catalog) < 2:
             raise ValueError("recognition.categories must define at least two comparison classes")
-        self.semantic_min_score = float(semantic_min_score)
+        self.semantic_min_similarity = float(semantic_min_similarity)
         self.semantic_min_margin = float(semantic_min_margin)
-        self.semantic_top_fraction = float(semantic_top_fraction)
-        if not 0.0 < self.semantic_top_fraction <= 1.0:
-            raise ValueError("semantic_top_fraction must be in (0, 1]")
+        self.crop_padding = float(crop_padding)
+        if self.crop_padding < 0:
+            raise ValueError("crop_padding must be non-negative")
         model_path = Path(clipseg_model)
         if not model_path.is_dir():
             raise FileNotFoundError(f"CLIPSeg model directory not found: {model_path}")
@@ -212,30 +249,62 @@ class SamPipeline:
         self.detector = CLIPSegForImageSegmentation.from_pretrained(
             str(model_path), local_files_only=True
         ).eval().to("cpu")
+        self.category_names, self.text_features = self._encode_catalog_texts()
         sam = sam_model_registry["vit_t"](checkpoint=str(checkpoint))
         self.predictor = SamPredictor(sam.eval().to(self.device))
 
-    def _score_maps(self, rgb: np.ndarray) -> dict[str, np.ndarray]:
+    def _encode_catalog_texts(self) -> tuple[list[str], torch.Tensor]:
+        category_names = list(self.catalog)
+        category_features = []
+        for name in category_names:
+            prompts = list(self.catalog[name].prompts)
+            inputs = self.processor(
+                text=prompts, padding="max_length", return_tensors="pt"
+            ).to("cpu")
+            with torch.inference_mode():
+                features = self.detector.clip.get_text_features(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                ).pooler_output
+            features = normalize_feature_rows(features.cpu().numpy())
+            mean_feature = normalize_feature_rows(features.mean(axis=0, keepdims=True))[0]
+            category_features.append(torch.from_numpy(mean_feature))
+        return category_names, torch.stack(category_features, dim=0)
+
+    def _target_probability(self, rgb: np.ndarray, target: ToolCategory) -> np.ndarray:
         height, width = rgb.shape[:2]
-        categories = list(self.catalog.values())
         image = Image.fromarray(rgb)
         inputs = self.processor(
-            text=[item.prompt for item in categories],
-            images=[image] * len(categories),
+            text=[target.localization_prompt], images=[image],
             padding="max_length", return_tensors="pt",
         ).to("cpu")
         with torch.inference_mode():
             logits = self.detector(**inputs).logits.unsqueeze(1)
-            probabilities = torch.nn.functional.interpolate(
+            probability = torch.nn.functional.interpolate(
                 torch.sigmoid(logits), (height, width), mode="bilinear", align_corners=False
-            )[:, 0].cpu().numpy()
-        return {item.name: probabilities[index] for index, item in enumerate(categories)}
+            )[0, 0].cpu().numpy()
+        return probability
+
+    def _candidate_similarities(
+        self, rgb: np.ndarray, objects: list[SamObject]
+    ) -> list[dict[str, float]]:
+        crops = [masked_object_crop(rgb, item.mask, self.crop_padding) for item in objects]
+        inputs = self.processor(images=crops, return_tensors="pt").to("cpu")
+        with torch.inference_mode():
+            image_features = self.detector.clip.get_image_features(
+                pixel_values=inputs["pixel_values"]
+            ).pooler_output
+        image_features = torch.from_numpy(normalize_feature_rows(image_features.cpu().numpy()))
+        similarities = image_features @ self.text_features.T
+        return [
+            {name: float(row[index]) for index, name in enumerate(self.category_names)}
+            for row in similarities.cpu().numpy()
+        ]
 
     def predict(self, image_bgr: np.ndarray, text: str) -> list[SamObject]:
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         target = resolve_tool_request(text, self.catalog)
-        score_maps = self._score_maps(rgb)
-        probability = score_maps[target.name]
+        probability = self._target_probability(rgb, target)
         binary = (probability > self.threshold).astype(np.uint8) * 255
         kernel = np.ones((5, 5), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
@@ -278,17 +347,20 @@ class SamPipeline:
             objects.append(SamObject(mask, _mask_box(mask), clip_score, sam_score))
         objects = merge_overlapping_objects(objects, self.overlap_merge)
         classified = []
-        for item in objects:
-            scores, accepted, reason = classify_mask(
-                score_maps, item.mask, target.name,
-                self.semantic_min_score, self.semantic_min_margin,
-                self.semantic_top_fraction,
+        for item, similarities in zip(objects, self._candidate_similarities(rgb, objects)):
+            scores, accepted, reason = classify_similarities(
+                similarities, target.name,
+                self.semantic_min_similarity, self.semantic_min_margin,
             )
+            predicted_class = max(scores, key=scores.get)
             competitors = [(name, score) for name, score in scores.items() if name != target.name]
             competing_class, competing_score = max(competitors, key=lambda pair: pair[1])
             classified.append(SamObject(
                 item.mask, item.box, item.clipseg_score, item.sam_score,
                 target.name, scores[target.name], competing_class, competing_score,
                 scores[target.name] - competing_score, accepted, reason, scores,
+                predicted_class, "clip_cosine",
+                target.localization_prompt,
+                {name: category.prompts for name, category in self.catalog.items()},
             ))
         return classified

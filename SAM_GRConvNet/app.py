@@ -41,9 +41,9 @@ def build_models(config: dict):
         max_mask_fraction=sam_cfg.get("max_mask_fraction", 0.70),
         overlap_merge=sam_cfg.get("overlap_merge", 0.20),
         categories=recognition_cfg.get("categories"),
-        semantic_min_score=recognition_cfg.get("min_target_score", 0.35),
-        semantic_min_margin=recognition_cfg.get("min_margin", 0.03),
-        semantic_top_fraction=recognition_cfg.get("top_fraction", 0.25),
+        semantic_min_similarity=recognition_cfg.get("min_similarity", 0.20),
+        semantic_min_margin=recognition_cfg.get("min_margin", 0.01),
+        crop_padding=recognition_cfg.get("crop_padding", 0.10),
     )
     backend = grasp_cfg.get("backend", "geometry")
     if backend != "geometry":
@@ -82,7 +82,7 @@ def render(image: np.ndarray, objects, prediction):
             corners = np.rint(candidate.corners_xy).astype(np.int32)
             cv2.polylines(display, [corners], True, (0, 230, 255), 3)
             cv2.circle(display, candidate.center_xy, 6, (0, 0, 255), -1)
-            label = (f"#{index} {obj.target_class} S={obj.target_score:.3f} "
+            label = (f"#{index} {obj.target_class} C={obj.target_score:.3f} "
                      f"Q={candidate.quality:.3f} A={candidate.angle_deg:.1f} W={candidate.width_px:.0f}px")
         else:
             reason = fusion.rejection_reason if fusion else "no grasp prediction"
@@ -111,11 +111,15 @@ def save_result(output: Path, image: np.ndarray, prompt: str, objects, predictio
             "id": index, "box": list(obj.box), "clipseg_score": obj.clipseg_score,
             "sam_score": obj.sam_score, "mask": mask_name,
             "target_class": obj.target_class, "target_score": obj.target_score,
+            "predicted_class": obj.predicted_class,
             "competing_class": obj.competing_class,
             "competing_score": obj.competing_score,
             "semantic_margin": obj.semantic_margin,
             "semantic_accepted": obj.semantic_accepted,
-            "class_scores": obj.class_scores,
+            "semantic_backend": obj.semantic_backend,
+            "localization_prompt": obj.localization_prompt,
+            "classification_prompts": obj.classification_prompts,
+            "similarities": obj.class_scores,
             "grasp": prediction.grasps[index - 1].as_dict(),
         })
     if prediction:
