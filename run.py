@@ -14,6 +14,7 @@ IMAGE_PATH = "test.jpg"
 TEXT_PROMPT = "a screwdriver"
 HO_SERIAL = "215122257404"  # 手外固定 D455：粗定位
 HI_SERIAL = "215222074676"  # 手内 D435i：精定位
+D455_ROI = (170, 95, 500, 370)  # 工作台区域，裁剪后放大识别远处小工具
 
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -66,6 +67,7 @@ def main() -> None:
             output_root=str(PROJECT_ROOT / "outputs" / "realsense"),
             d455_serial=HO_SERIAL,
             d435i_serial=HI_SERIAL,
+            d455_roi=D455_ROI,
         )
     else:
         raise ValueError('RUN_MODE 只能填写 "image" 或 "realsense"。')
