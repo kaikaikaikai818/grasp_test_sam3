@@ -52,20 +52,46 @@ def list_devices() -> list[DeviceInfo]:
     return devices
 
 
-def find_required_devices() -> dict[str, DeviceInfo]:
+def find_required_devices(
+    d455_serial: str | None = None,
+    d435i_serial: str | None = None,
+) -> dict[str, DeviceInfo]:
+    """Select the two calibrated cameras, preferring their exact serials."""
     connected = list_devices()
     selected: dict[str, DeviceInfo] = {}
-    for device in connected:
-        name = device.model.upper()
-        if "D455" in name:
-            selected["d455"] = device
-        elif "D435I" in name:
-            selected["d435i"] = device
+    requested = {"d455": d455_serial, "d435i": d435i_serial}
+    if any(requested.values()):
+        by_serial = {device.serial: device for device in connected}
+        for role, serial in requested.items():
+            if serial:
+                device = by_serial.get(serial)
+                if device is not None:
+                    selected[role] = device
+    else:
+        for device in connected:
+            name = device.model.upper()
+            if "D455" in name:
+                selected["d455"] = device
+            elif "D435I" in name:
+                selected["d435i"] = device
 
     missing = [model.upper() for model in ("d455", "d435i") if model not in selected]
     if missing:
         names = ", ".join(f"{d.model} ({d.serial})" for d in connected) or "无"
-        raise RuntimeError(f"缺少 RealSense 设备：{', '.join(missing)}。当前检测到：{names}")
+        expected = ", ".join(
+            f"{role.upper()}={serial}" for role, serial in requested.items() if serial
+        )
+        suffix = f"；期望序列号：{expected}" if expected else ""
+        raise RuntimeError(
+            f"缺少 RealSense 设备：{', '.join(missing)}。当前检测到：{names}{suffix}"
+        )
+    expected_models = {"d455": "D455", "d435i": "D435I"}
+    for role, device in selected.items():
+        if expected_models[role] not in device.model.upper():
+            raise RuntimeError(
+                f"序列号 {device.serial} 应作为 {expected_models[role]}，"
+                f"但设备报告为 {device.model}。"
+            )
     for device in selected.values():
         if device.usb_type.startswith("2"):
             raise RuntimeError(f"{device.model} 当前连接为 USB {device.usb_type}，请改用 USB 3.x 接口。")

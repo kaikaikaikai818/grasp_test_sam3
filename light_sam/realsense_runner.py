@@ -116,8 +116,14 @@ def _render_and_save(
     return visualization
 
 
-def run_realsense(checkpoint: str, prompt: str, output_root: str) -> None:
-    devices = find_required_devices()
+def run_realsense(
+    checkpoint: str,
+    prompt: str,
+    output_root: str,
+    d455_serial: str | None = None,
+    d435i_serial: str | None = None,
+) -> None:
+    devices = find_required_devices(d455_serial, d435i_serial)
     cameras: dict[str, RealSenseCamera] = {}
     try:
         cameras["d455"] = RealSenseCamera(devices["d455"])
@@ -140,8 +146,12 @@ def run_realsense(checkpoint: str, prompt: str, output_root: str) -> None:
                         views[role], "Inference failed - preview continues", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA,
                     )
-            cv2.imshow("D455 - Global Search", views["d455"])
-            cv2.imshow("D435i - Wrist Refinement", views["d435i"])
+            cv2.imshow(
+                f"D455 - Global Search [{devices['d455'].serial}]", views["d455"]
+            )
+            cv2.imshow(
+                f"D435i - Wrist Refinement [{devices['d435i'].serial}]", views["d435i"]
+            )
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break

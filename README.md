@@ -1,6 +1,6 @@
 # 轻量文字分割与 RealSense 三维定位
 
-程序使用 CLIPSeg 在 CPU 上定位文字描述的目标，再使用 MobileSAM 在 NVIDIA GPU 上生成精细分割结果。支持单张图片，也支持 D455 与 D435i 双 RealSense 实时识别和相机坐标系三维定位。
+程序使用 CLIPSeg 在 CPU 上定位文字描述的目标，再使用 MobileSAM 在 NVIDIA GPU 上生成精细分割结果。当前主入口固定先跑通螺丝刀：D455（`215122257404`）固定粗定位，D435i（`215222074676`）手内精定位，全程只做视觉输出。
 
 ## 运行
 
@@ -11,14 +11,14 @@
 ```python
 RUN_MODE = "image"
 IMAGE_PATH = r"test3.jpg"
-TEXT_PROMPT = "a wrench"
+TEXT_PROMPT = "a screwdriver"
 ```
 
 双相机模式：
 
 ```python
 RUN_MODE = "realsense"
-TEXT_PROMPT = "a wrench"
+TEXT_PROMPT = "a screwdriver"
 ```
 
 双相机模式自动把 D455 作为固定全局相机、D435i 作为机械臂末端相机。两个实时窗口显示 mask、目标编号、深度和 XYZ；按 `Q` 或 `Esc` 退出。D435i 的 IMU 当前不使用。

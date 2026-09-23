@@ -7,11 +7,13 @@ import warnings
 from pathlib import Path
 
 # ========================
-# 只需要修改这里：image=单张图片，realsense=双相机实时识别
+# 当前阶段固定跑通螺丝刀：D455粗定位，D435i精定位，纯视觉不控制机器人
 # ========================
 RUN_MODE = "realsense"
 IMAGE_PATH = "test.jpg"
-TEXT_PROMPT = "a wrench"
+TEXT_PROMPT = "a screwdriver"
+HO_SERIAL = "215122257404"  # 手外固定 D455：粗定位
+HI_SERIAL = "215222074676"  # 手内 D435i：精定位
 
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -62,6 +64,8 @@ def main() -> None:
             checkpoint=str(checkpoint),
             prompt=prompt,
             output_root=str(PROJECT_ROOT / "outputs" / "realsense"),
+            d455_serial=HO_SERIAL,
+            d435i_serial=HI_SERIAL,
         )
     else:
         raise ValueError('RUN_MODE 只能填写 "image" 或 "realsense"。')
