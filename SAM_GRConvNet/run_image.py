@@ -27,7 +27,11 @@ def main():
         args.output, image, args.text, objects, prediction,
         {"image": str(args.image.resolve()), "seconds": time.perf_counter() - started},
     )
-    print(f"完成：发现 {metadata['object_count']} 个目标。结果：{args.output.resolve()}")
+    print(
+        f"完成：候选 {metadata['object_count']} 个，"
+        f"语义通过 {metadata['semantic_accepted_count']} 个，"
+        f"安全抓取 {metadata['accepted_object_count']} 个。结果：{args.output.resolve()}"
+    )
 
 
 if __name__ == "__main__":

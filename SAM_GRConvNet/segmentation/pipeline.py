@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -64,6 +64,82 @@ class SamObject:
     box: tuple[int, int, int, int]
     clipseg_score: float
     sam_score: float
+    target_class: str = ""
+    target_score: float = 0.0
+    competing_class: str = ""
+    competing_score: float = 0.0
+    semantic_margin: float = 0.0
+    semantic_accepted: bool = True
+    rejection_reason: str | None = None
+    class_scores: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolCategory:
+    name: str
+    prompt: str
+    aliases: tuple[str, ...]
+    graspable: bool = True
+
+
+def _normalise_text(value: str) -> str:
+    return " ".join(value.strip().lower().replace("_", " ").split())
+
+
+def build_tool_catalog(raw_categories: dict | None) -> dict[str, ToolCategory]:
+    catalog: dict[str, ToolCategory] = {}
+    for name, raw in (raw_categories or {}).items():
+        prompt = str(raw.get("prompt", name.replace("_", " "))).strip()
+        aliases = tuple({_normalise_text(name), _normalise_text(prompt), *(
+            _normalise_text(str(alias)) for alias in raw.get("aliases", [])
+        )})
+        catalog[name] = ToolCategory(name, prompt, aliases, bool(raw.get("graspable", True)))
+    return catalog
+
+
+def resolve_tool_request(text: str, catalog: dict[str, ToolCategory]) -> ToolCategory:
+    """Resolve a user phrase to one configured, graspable tool category."""
+    query = _normalise_text(text)
+    exact = [(item, len(query)) for item in catalog.values() if query in item.aliases]
+    contained = [
+        (item, max(len(alias) for alias in item.aliases if alias and alias in query))
+        for item in catalog.values() if any(alias and alias in query for alias in item.aliases)
+    ]
+    matches = [(item, length) for item, length in (exact or contained) if item.graspable]
+    if not matches:
+        supported = ", ".join(item.prompt for item in catalog.values() if item.graspable)
+        raise ValueError(f"unsupported tool request: {text!r}; supported tools: {supported}")
+    return max(matches, key=lambda pair: pair[1])[0]
+
+
+def masked_top_score(probability: np.ndarray, mask: np.ndarray, top_fraction: float) -> float:
+    values = np.asarray(probability, dtype=float)[np.asarray(mask, dtype=bool)]
+    if values.size == 0:
+        return 0.0
+    count = max(1, int(np.ceil(values.size * top_fraction)))
+    return float(np.partition(values, values.size - count)[-count:].mean())
+
+
+def classify_mask(
+    score_maps: dict[str, np.ndarray], mask: np.ndarray, target_class: str,
+    min_score: float, min_margin: float, top_fraction: float,
+) -> tuple[dict[str, float], bool, str | None]:
+    scores = {
+        name: masked_top_score(probability, mask, top_fraction)
+        for name, probability in score_maps.items()
+    }
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    winner, winner_score = ordered[0]
+    target_score = scores[target_class]
+    competitor_score = max((score for name, score in ordered if name != target_class), default=0.0)
+    if target_score < min_score:
+        return scores, False, f"target confidence {target_score:.3f} below {min_score:.3f}"
+    if winner != target_class:
+        return scores, False, f"looks more like {winner} ({winner_score:.3f})"
+    margin = target_score - competitor_score
+    if margin < min_margin:
+        return scores, False, f"semantic margin {margin:.3f} below {min_margin:.3f}"
+    return scores, True, None
 
 
 def merge_overlapping_objects(
@@ -104,7 +180,9 @@ class SamPipeline:
     def __init__(self, checkpoint, clipseg_model, device="cuda", threshold=0.3,
                  min_area=100, min_score=0.35, max_objects=10,
                  complete_object=True, sam_score_tolerance=0.12,
-                 max_mask_fraction=0.70, overlap_merge=0.20):
+                 max_mask_fraction=0.70, overlap_merge=0.20,
+                 categories=None, semantic_min_score=0.35,
+                 semantic_min_margin=0.03, semantic_top_fraction=0.25):
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("MobileSAM requires CUDA")
@@ -116,6 +194,14 @@ class SamPipeline:
         self.sam_score_tolerance = float(sam_score_tolerance)
         self.max_mask_fraction = float(max_mask_fraction)
         self.overlap_merge = float(overlap_merge)
+        self.catalog = build_tool_catalog(categories)
+        if len(self.catalog) < 2:
+            raise ValueError("recognition.categories must define at least two comparison classes")
+        self.semantic_min_score = float(semantic_min_score)
+        self.semantic_min_margin = float(semantic_min_margin)
+        self.semantic_top_fraction = float(semantic_top_fraction)
+        if not 0.0 < self.semantic_top_fraction <= 1.0:
+            raise ValueError("semantic_top_fraction must be in (0, 1]")
         model_path = Path(clipseg_model)
         if not model_path.is_dir():
             raise FileNotFoundError(f"CLIPSeg model directory not found: {model_path}")
@@ -129,17 +215,27 @@ class SamPipeline:
         sam = sam_model_registry["vit_t"](checkpoint=str(checkpoint))
         self.predictor = SamPredictor(sam.eval().to(self.device))
 
-    def predict(self, image_bgr: np.ndarray, text: str) -> list[SamObject]:
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    def _score_maps(self, rgb: np.ndarray) -> dict[str, np.ndarray]:
         height, width = rgb.shape[:2]
+        categories = list(self.catalog.values())
+        image = Image.fromarray(rgb)
         inputs = self.processor(
-            text=[text], images=[Image.fromarray(rgb)], padding="max_length", return_tensors="pt"
+            text=[item.prompt for item in categories],
+            images=[image] * len(categories),
+            padding="max_length", return_tensors="pt",
         ).to("cpu")
         with torch.inference_mode():
             logits = self.detector(**inputs).logits.unsqueeze(1)
-            probability = torch.nn.functional.interpolate(
+            probabilities = torch.nn.functional.interpolate(
                 torch.sigmoid(logits), (height, width), mode="bilinear", align_corners=False
-            )[0, 0].cpu().numpy()
+            )[:, 0].cpu().numpy()
+        return {item.name: probabilities[index] for index, item in enumerate(categories)}
+
+    def predict(self, image_bgr: np.ndarray, text: str) -> list[SamObject]:
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        target = resolve_tool_request(text, self.catalog)
+        score_maps = self._score_maps(rgb)
+        probability = score_maps[target.name]
         binary = (probability > self.threshold).astype(np.uint8) * 255
         kernel = np.ones((5, 5), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
@@ -180,4 +276,19 @@ class SamPipeline:
                 best = int(np.argmax(scores))
                 mask, sam_score = masks[best], float(scores[best])
             objects.append(SamObject(mask, _mask_box(mask), clip_score, sam_score))
-        return merge_overlapping_objects(objects, self.overlap_merge)
+        objects = merge_overlapping_objects(objects, self.overlap_merge)
+        classified = []
+        for item in objects:
+            scores, accepted, reason = classify_mask(
+                score_maps, item.mask, target.name,
+                self.semantic_min_score, self.semantic_min_margin,
+                self.semantic_top_fraction,
+            )
+            competitors = [(name, score) for name, score in scores.items() if name != target.name]
+            competing_class, competing_score = max(competitors, key=lambda pair: pair[1])
+            classified.append(SamObject(
+                item.mask, item.box, item.clipseg_score, item.sam_score,
+                target.name, scores[target.name], competing_class, competing_score,
+                scores[target.name] - competing_score, accepted, reason, scores,
+            ))
+        return classified

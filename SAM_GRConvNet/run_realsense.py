@@ -49,13 +49,18 @@ def main():
                 objects, prediction = infer(image, args.text, sam, grasp)
                 folder = args.output / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-                last_overlay, _ = save_result(
+                last_overlay, metadata = save_result(
                     folder, image, args.text, objects, prediction,
                     {"camera_serial": profile.get_device().get_info(rs.camera_info.serial_number),
                      "depth_scale": float(depth_scale), "depth_saved": "depth.npy"},
                 )
                 np.save(folder / "depth.npy", np.asanyarray(depth_frame.get_data()))
-                print(f"已保存视觉结果：{folder.resolve()}")
+                print(
+                    f"已保存视觉结果：{folder.resolve()} | "
+                    f"候选 {metadata['object_count']}，"
+                    f"语义通过 {metadata['semantic_accepted_count']}，"
+                    f"安全抓取 {metadata['accepted_object_count']}"
+                )
     finally:
         pipeline.stop()
         cv2.destroyAllWindows()

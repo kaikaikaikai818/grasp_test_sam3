@@ -14,6 +14,44 @@ sam:
   max_mask_fraction: 0.70
   overlap_merge: 0.20
 
+recognition:
+  min_target_score: 0.35
+  min_margin: 0.03
+  top_fraction: 0.25
+  categories:
+    adjustable_wrench:
+      prompt: adjustable wrench
+      aliases: [wrench, wrench handle, adjustable wrench handle, 扳手, 活动扳手]
+      graspable: true
+    screwdriver:
+      prompt: screwdriver
+      aliases: [screw driver, screwdriver handle, 螺丝刀, 改锥]
+      graspable: true
+    pliers:
+      prompt: pliers
+      aliases: [plier, 钳子, 老虎钳]
+      graspable: true
+    hammer:
+      prompt: hammer
+      aliases: [hammer handle, 锤子, 榔头]
+      graspable: true
+    hex_key:
+      prompt: hex key
+      aliases: [allen key, hex wrench, 内六角, 内六角扳手]
+      graspable: true
+    pen:
+      prompt: pen
+      aliases: [pencil, 笔, 铅笔]
+      graspable: false
+    mobile_phone:
+      prompt: mobile phone
+      aliases: [phone, smartphone, 手机]
+      graspable: false
+    box:
+      prompt: box
+      aliases: [case, container, 盒子]
+      graspable: false
+
 grasp:
   backend: geometry
   opening_scale: 1.15
