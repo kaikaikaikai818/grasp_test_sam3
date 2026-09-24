@@ -22,6 +22,7 @@ echo 4. Validate with the independent dataset
 echo 5. Test the high observation pose - press P when both cameras pass
 echo 6. Test high safe orientation - no descent or gripper action
 echo 7. Test no-contact descent - stop 40 mm above the tool
+echo 8. Recovery lift - press U to move vertically to 250 mm
 echo Q. Exit
 set "ACTION="
 set /p "ACTION=Select an option: "
@@ -35,7 +36,8 @@ if "%ACTION%"=="4" goto validate
 if "%ACTION%"=="5" goto observe
 if "%ACTION%"=="6" goto rotate
 if "%ACTION%"=="7" goto descent
-echo [ERROR] Invalid option. Enter 0, 1, 2, 3, 4, 5, 6, 7, or Q.
+if "%ACTION%"=="8" goto recovery_lift
+echo [ERROR] Invalid option. Enter 0, 1, 2, 3, 4, 5, 6, 7, 8, or Q.
 goto menu
 
 :require_robot_modules
@@ -107,6 +109,16 @@ echo Press P at dual-camera PASS, then Y after D435i becomes STABLE.
 echo Wait for SAFE DESCENT READY 3/3, then press D once.
 echo The TCP stops 40 mm above the tool. The gripper is not initialized.
 "%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "screwdriver" --stage descent --check-calib
+pause
+goto menu
+
+:recovery_lift
+call :require_robot_modules
+if errorlevel 1 goto missing_modules
+echo [WARNING] This mode connects robot control.
+echo Press U once to keep the current XY and orientation and lift to 250 mm.
+echo No horizontal motion, descent, or gripper command is allowed.
+"%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "screwdriver" --stage observe --check-calib
 pause
 goto menu
 

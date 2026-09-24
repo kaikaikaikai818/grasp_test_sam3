@@ -315,6 +315,9 @@ def main():
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
+    if ENABLE_SAFE_APPROACH_TEST:
+        print("  U -> 保持当前XY和姿态，只垂直回升到至少 %.0fmm 安全高度" %
+              (SAFE_TRAVEL_Z_M * 1000.0))
     print("  R -> 已审核工具低力夹持并抬升 %.0fmm（需对应工具标定）"
           % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
     print("  t -> 抓取成功后：垂直抬到安全搬运高度，再恢复初始标准角度")
@@ -662,6 +665,12 @@ def main():
                     print("[持物姿态恢复] 先垂直抬到安全搬运高度，再恢复初始标准角度。")
                     orientation_return_completed = normalize_tool_pose(
                         robot, carrying_tool=True)
+            elif key == ord('u'):
+                if not ENABLE_SAFE_APPROACH_TEST:
+                    print("[安全锁定] 当前阶段未连接机械臂控制，不能执行垂直回升。")
+                elif retreat_vertical_to_safe_height(robot):
+                    observation_active = False
+                    print("[安全回升] 已到安全高度；请按 q 退出本阶段。")
             elif key == ord('a'):
                 if not ENABLE_SAFE_APPROACH_TEST:
                     print("[安全锁定] 请先将 ENABLE_SAFE_APPROACH_TEST 改为 True；默认不允许机械臂运动。")
@@ -1378,6 +1387,41 @@ def move_to_safe_observation(robot, destination_xyz):
                 robot.rtde_c.stopL(1.0)
         except Exception as stop_exc:
             print("[提示] 无法发送停止命令，请用示教器检查：%s" % stop_exc)
+        return False
+
+
+def retreat_vertical_to_safe_height(robot):
+    """Raise vertically at the current XY/orientation; never move down or use the gripper."""
+    try:
+        current = _read_valid_tcp_pose(robot)
+        target = current.copy()
+        target[2] = max(float(current[2]), SAFE_TRAVEL_Z_M)
+        if not point_in_workspace(target[:3]):
+            print("[安全中止] 垂直回升目标超出工作空间：%s" %
+                  ["%.4f" % value for value in target])
+            return False
+        if target[2] <= current[2] + 0.001:
+            print("[安全回升] 当前TCP已经位于安全高度，不发送运动命令。")
+            return True
+        print("[安全回升] 保持XY和姿态，垂直升至 z=%.3fm" % target[2])
+        robot.moveL(target.tolist(), speed=SAFE_APPROACH_SPEED,
+                    acceleration=SAFE_APPROACH_ACCELERATION)
+        actual = _read_valid_tcp_pose(robot)
+        xy_error = float(np.linalg.norm(actual[:2] - current[:2]))
+        if actual[2] < SAFE_TRAVEL_Z_M - 0.005 or xy_error > 0.005:
+            print("[安全中止] 回升后位姿验证失败：实际TCP=%s" %
+                  ["%.4f" % value for value in actual])
+            return False
+        print("[安全回升完成] 实际TCP=%s；未发送夹爪命令。" %
+              ["%.4f" % value for value in actual])
+        return True
+    except Exception as exc:
+        print("[安全中止] 垂直回升失败：%s" % exc)
+        try:
+            if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
+                robot.rtde_c.stopL(1.0)
+        except Exception:
+            pass
         return False
 
 
