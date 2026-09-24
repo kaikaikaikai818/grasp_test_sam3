@@ -503,6 +503,7 @@ def main():
                 calibration=screwdriver_calibration,
                 handle_thickness_m=handle_thickness,
                 profile=profile,
+                require_adaptive=ENABLE_SCREWDRIVER_GRASP,
                 orientation=(current_orientation if args.enable_angle_rotation
                              and angle_stable else None))
             if observation_active and grasp_preview.get("ready"):
@@ -733,6 +734,8 @@ def main():
                     print("[安全锁定] 旋转后方向未重新稳定或与当前姿态不一致。")
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
+                elif ENABLE_SCREWDRIVER_GRASP and not grasp_preview.get("adaptive"):
+                    print("[安全锁定] 实际夹持必须锁定固定平面和自适应夹持高度。")
                 elif descent_ready_streak < SAFE_DESCENT_CONFIRM_FRAMES:
                     print("[安全锁定] D435i 稳定帧不足：%d/%d。" %
                           (descent_ready_streak, SAFE_DESCENT_CONFIRM_FRAMES))
@@ -752,9 +755,8 @@ def main():
                     print("[安全锁定] 请先完成 P 和 D 无接触下降测试。")
                 elif "grasp_tcp_z_m" not in locked_screwdriver_handle:
                     print("[安全锁定] D 未记录自适应夹持高度；请重新运行 P → D。")
-                elif not (hi_gate["passed"] and (hi_handle is not None or profile is not None)
-                          and current_support_plane is not None):
-                    print("[安全锁定] 等待稳定手柄区域和当前支撑面。")
+                elif not (hi_gate["passed"] and (hi_handle is not None or profile is not None)):
+                    print("[安全锁定] 等待稳定手柄区域。")
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
@@ -942,7 +944,8 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied,
 
 def build_grasp_preview(hi_base, hi_gate, observation_active,
                         support_plane=None, calibration=None,
-                        handle_thickness_m=None, orientation=None, profile=None):
+                        handle_thickness_m=None, orientation=None, profile=None,
+                        require_adaptive=False):
     """Plan the descent to the handle mid using the adaptive grasp model.
 
     The handle thickness is estimated from its projected width every attempt, and
@@ -960,6 +963,17 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
     if not point_in_workspace(target):
         preview["reason"] = "D435i target outside workspace"
         return preview
+
+    if require_adaptive and profile is None:
+        if calibration is None:
+            preview["reason"] = "fixed support-plane calibration unavailable"
+            return preview
+        if support_plane is None:
+            preview["reason"] = "live support plane unavailable"
+            return preview
+        if handle_thickness_m is None:
+            preview["reason"] = "stable screwdriver handle thickness unavailable"
+            return preview
 
     plan = None
     grasp_tcp_z = None
@@ -1605,6 +1619,9 @@ def attempt_descent(robot, grasp_preview, current_support_plane):
     Shared by the manual D key and the one-key auto grasp so both use the same
     safety checks.
     """
+    if ENABLE_SCREWDRIVER_GRASP and not grasp_preview.get("adaptive"):
+        print("[安全中止] 实际夹持阶段没有锁定自适应夹持高度，拒绝下降。")
+        return None
     if not move_to_safe_descent_test(robot, grasp_preview):
         return None
     locked = {
