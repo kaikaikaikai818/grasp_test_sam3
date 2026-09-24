@@ -49,7 +49,8 @@ from bsp.camera_bsp.tool_profiles import load_tool_profile
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
                                                 principal_axis_base)
-from bsp.camera_bsp.screwdriver_grasp import (estimate_handle_thickness,
+from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
+                                               estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
                                                load_calibration, plan_grasp_tcp,
@@ -436,9 +437,8 @@ def main():
                                 res_hi, hi_status, "D435I", state["hi_base"])
                             def hi_pixel_to_base(u, v, depth_m):
                                 point_camera_mm = robot.pixel_to_camera(u, v, depth_m * 1000.0)
-                                _, point_base_mm = robot.camera_to_base(
-                                    point_camera_mm, tcp_pose=tcp_pose)
-                                return np.asarray(point_base_mm, dtype=np.float64) / 1000.0
+                                return base_point_m(robot.camera_to_base(
+                                    point_camera_mm, tcp_pose=tcp_pose))
                             if (args.enable_angle_rotation or args.show_angle) and tool_category in (
                                     "screwdriver", "adjustable wrench", "rubber mallet",
                                     "tape dispenser"):

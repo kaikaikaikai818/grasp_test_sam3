@@ -5,13 +5,24 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bsp.camera_bsp.screwdriver_grasp import (estimate_handle_thickness,
+from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
+                                               estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
                                                plan_grasp_tcp)
 
 
 class ScrewdriverGeometryTests(unittest.TestCase):
+    def test_camera_to_base_metre_value_is_not_scaled_twice(self):
+        transform_result = (np.array([100.0, -200.0, 19.0]),
+                            np.array([0.100, -0.200, 0.019]))
+        np.testing.assert_allclose(
+            base_point_m(transform_result), [0.100, -0.200, 0.019])
+
+    def test_invalid_camera_transform_result_is_rejected(self):
+        with self.assertRaises(ValueError):
+            base_point_m(np.array([0.0, 0.0, 0.019]))
+
     def test_handle_diameter_from_projected_width(self):
         # A 30 mm cylinder at 0.25 m with f=600 px projects to a 36 px radius.
         thickness, reason = estimate_handle_thickness(36.0, 0.25, 600.0)

@@ -18,6 +18,7 @@ from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
 from bsp.camera_bsp.screwdriver_grasp import (find_screwdriver_handle,
                                                fit_horizontal_support_plane,
                                                estimate_handle_thickness,
+                                               base_point_m,
                                                result_at_handle, save_calibration)
 
 ROOT = Path(__file__).resolve().parent
@@ -69,8 +70,7 @@ def main():
                 if tcp is None:
                     raise ValueError("read-only TCP unavailable")
                 p_cam = robot.pixel_to_camera(u, v, z_m * 1000.0)
-                _, p_base = robot.camera_to_base(p_cam, tcp_pose=tcp)
-                return np.asarray(p_base, dtype=float) / 1000.0
+                return base_point_m(robot.camera_to_base(p_cam, tcp_pose=tcp))
 
             result = handle = selected = None
             status = ""

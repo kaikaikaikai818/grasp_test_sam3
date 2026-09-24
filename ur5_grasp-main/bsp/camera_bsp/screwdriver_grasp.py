@@ -30,6 +30,21 @@ class SupportPlane:
     inlier_count: int
 
 
+def base_point_m(camera_to_base_result) -> np.ndarray:
+    """Extract the metre-valued point returned by ``camera_to_base``.
+
+    ``UR_Robot.camera_to_base`` returns ``(point_mm, point_m)``.  Centralising
+    the unpacking prevents an already-metre value from being divided by 1000
+    a second time.
+    """
+    if not isinstance(camera_to_base_result, tuple) or len(camera_to_base_result) != 2:
+        raise ValueError("camera_to_base must return (point_mm, point_m)")
+    point = np.asarray(camera_to_base_result[1], dtype=np.float64).reshape(-1)
+    if point.size != 3 or not np.all(np.isfinite(point)):
+        raise ValueError("invalid base-frame point in metres")
+    return point
+
+
 def find_screwdriver_handle(result: dict, depth_raw: np.ndarray, depth_scale: float,
                             min_radius_px: float = 4.0) -> tuple[Optional[HandleCandidate], str]:
     """Find the thickest interior mask region, which is the screwdriver handle.
