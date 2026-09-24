@@ -1628,14 +1628,27 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
     ``"done"`` or ``"failed"``.  Shared by the manual R key and the one-key grasp.
     """
     if not (hi_gate["passed"] and (hi_handle is not None or grip_profile is not None)
-            and current_support_plane is not None and current_target is not None):
-        return "waiting", "等待稳定手柄区域和当前支撑面。"
+            and current_target is not None):
+        return "waiting", "等待稳定手柄区域和当前目标。"
     if locked_handle is None or "grasp_tcp_z_m" not in locked_handle:
         return "failed", "未记录自适应夹持高度；请重新运行下降。"
     locked_plane_z = locked_handle.get("support_plane_z_m")
-    if (locked_plane_z is None or abs(current_support_plane.z_m - locked_plane_z)
-            > SUPPORT_PLANE_SHIFT_MAX_M):
-        return "failed", "下降后支撑面高度发生变化；拒绝继续夹持。"
+    if locked_plane_z is None:
+        return "failed", "下降前未锁定固定支撑面；拒绝继续夹持。"
+    # The fixed surface is verified against live D435i depth before D.  At the
+    # 40 mm stop the wrist camera is close to the target and partly occluded by
+    # the gripper, so a fresh dominant-plane fit can switch to the surrounding
+    # table.  Keep the already-verified fixed plane for motion; report the close
+    # view fit only as diagnostics.
+    if current_support_plane is None:
+        print("[低位平面诊断] D435i近距离未取得可靠平面；继续使用下降前锁定值 %.4fm。" %
+              float(locked_plane_z))
+    else:
+        close_delta = abs(float(current_support_plane.z_m) - float(locked_plane_z))
+        print("[低位平面诊断] 锁定=%.4fm 当前拟合=%.4fm 差值=%.1fmm；"
+              "固定平面运动仍使用锁定值。" %
+              (float(locked_plane_z), float(current_support_plane.z_m),
+               close_delta * 1000.0))
     locked_target = np.asarray(locked_handle["target_base_xyz_m"], dtype=np.float64)
     target_shift = float(np.linalg.norm(
         np.asarray(current_target, dtype=np.float64) - locked_target))
