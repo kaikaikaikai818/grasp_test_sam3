@@ -11,6 +11,7 @@ from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
                                                estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
+                                               locked_support_plane_z,
                                                load_calibration,
                                                plan_grasp_tcp)
 from bsp.camera_bsp.screwdriver_grasp import SupportPlane, verified_support_plane_z
@@ -68,9 +69,29 @@ class ScrewdriverGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(thickness, 0.030, places=4)
 
     def test_plan_grasp_tcp_uses_mid_and_offset(self):
-        tcp_z, plan = plan_grasp_tcp(0.050, 0.000, 0.0047)
+        tcp_z, plan = plan_grasp_tcp(0.050, 0.0215, 0.0047)
         self.assertIsNotNone(tcp_z, plan)
-        self.assertAlmostEqual(tcp_z, 0.0297, places=4)
+        self.assertAlmostEqual(tcp_z, 0.0512, places=4)
+        self.assertAlmostEqual(plan["support_plane_z_m"], 0.0215, places=4)
+
+    def test_descent_locks_saved_plane_before_motion(self):
+        locked, reason = locked_support_plane_z(
+            {"support_plane_z_m": 0.0214},
+            calibration={"support_plane_z_m": 0.0215},
+            live_plane=SupportPlane(0.0212, 0.001, 100))
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(locked, 0.0215, places=4)
+
+    def test_descent_rejects_missing_or_mismatched_planned_plane(self):
+        locked, reason = locked_support_plane_z(
+            {}, calibration={"support_plane_z_m": 0.0215})
+        self.assertIsNone(locked)
+        self.assertIn("plan", reason)
+        locked, reason = locked_support_plane_z(
+            {"support_plane_z_m": 0.0180},
+            calibration={"support_plane_z_m": 0.0215})
+        self.assertIsNone(locked)
+        self.assertIn("differ", reason)
 
     def test_plan_grasp_tcp_rejects_implausible_thickness(self):
         tcp_z, reason = plan_grasp_tcp(0.001, 0.000, 0.0)

@@ -173,10 +173,43 @@ def plan_grasp_tcp(handle_thickness_m: float, support_plane_z_m: float,
     tcp_z = handle_mid_z + float(gripper_offset_m)
     return tcp_z, {
         "handle_thickness_m": thickness,
+        "support_plane_z_m": float(support_plane_z_m),
         "handle_mid_z_m": handle_mid_z,
         "gripper_offset_m": float(gripper_offset_m),
         "grasp_tcp_z_m": tcp_z,
     }
+
+
+def locked_support_plane_z(plan: Optional[dict], calibration: Optional[dict] = None,
+                           live_plane: Optional[SupportPlane] = None,
+                           max_plan_delta_m: float = 0.001):
+    """Choose the support plane to lock before any descent motion.
+
+    For the calibrated screwdriver path, the one-time saved fixed plane is the
+    authority.  The preview plan must contain the same plane so a broken data
+    hand-off cannot move the robot and then fail only at the grasp stage.
+    """
+    plan = plan or {}
+    planned = plan.get("support_plane_z_m")
+    saved = (calibration or {}).get("support_plane_z_m")
+    if calibration is not None:
+        if saved is None:
+            return None, "saved calibration has no support plane"
+        if planned is None:
+            return None, "grasp plan has no locked support plane"
+        saved = float(saved)
+        planned = float(planned)
+        if not np.all(np.isfinite([saved, planned])):
+            return None, "support plane is not finite"
+        delta = abs(saved - planned)
+        if delta > float(max_plan_delta_m):
+            return None, "planned and saved support planes differ by %.1fmm" % (delta * 1000.0)
+        return saved, None
+    if planned is not None and np.isfinite(float(planned)):
+        return float(planned), None
+    if live_plane is not None and np.isfinite(float(live_plane.z_m)):
+        return float(live_plane.z_m), None
+    return None, "no support plane is available to lock"
 
 
 def save_calibration(path: Path, calibration: dict) -> None:

@@ -53,6 +53,7 @@ from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
                                                estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
+                                               locked_support_plane_z,
                                                load_calibration, plan_grasp_tcp,
                                                result_at_handle,
                                                verified_support_plane_z)
@@ -538,7 +539,9 @@ def main():
                         print("[一键抓取] 旋转后方向不一致，禁止下降。")
                         auto_grasp_state = "idle"
                         continue
-                    locked = attempt_descent(robot, grasp_preview, current_support_plane)
+                    locked = attempt_descent(
+                        robot, grasp_preview, current_support_plane,
+                        calibration=screwdriver_calibration)
                     if locked is None:
                         print("[一键抓取] 下降未通过安全门，停在观察点。")
                         auto_grasp_state = "idle"
@@ -740,7 +743,9 @@ def main():
                     print("[安全锁定] D435i 稳定帧不足：%d/%d。" %
                           (descent_ready_streak, SAFE_DESCENT_CONFIRM_FRAMES))
                 else:
-                    locked = attempt_descent(robot, grasp_preview, current_support_plane)
+                    locked = attempt_descent(
+                        robot, grasp_preview, current_support_plane,
+                        calibration=screwdriver_calibration)
                     if locked is not None:
                         locked_grasp_preview = dict(grasp_preview)
                         locked_screwdriver_handle = locked
@@ -1613,7 +1618,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
         return False
 
 
-def attempt_descent(robot, grasp_preview, current_support_plane):
+def attempt_descent(robot, grasp_preview, current_support_plane, calibration=None):
     """Run one guarded no-contact descent and return the locked handle, or None.
 
     Shared by the manual D key and the one-key auto grasp so both use the same
@@ -1622,14 +1627,22 @@ def attempt_descent(robot, grasp_preview, current_support_plane):
     if ENABLE_SCREWDRIVER_GRASP and not grasp_preview.get("adaptive"):
         print("[安全中止] 实际夹持阶段没有锁定自适应夹持高度，拒绝下降。")
         return None
+    locked_plane_z, plane_reason = locked_support_plane_z(
+        grasp_preview.get("plan"), calibration=calibration,
+        live_plane=current_support_plane)
+    if locked_plane_z is None:
+        print("[安全中止] 下降前无法锁定固定支撑面：%s。" % plane_reason)
+        return None
+    if grasp_preview.get("adaptive"):
+        grasp_tcp_z = float(grasp_preview["endpoint_xyz_m"][2])
+        print("[下降锁定] 固定支撑面=%.4fm，夹持TCP=%.4fm，净空=%.1fmm。" %
+              (locked_plane_z, grasp_tcp_z,
+               (grasp_tcp_z - locked_plane_z) * 1000.0))
     if not move_to_safe_descent_test(robot, grasp_preview):
         return None
     locked = {
         "target_base_xyz_m": list(grasp_preview["target_surface_xyz_m"]),
-        "support_plane_z_m": ((grasp_preview.get("plan") or {}).get("support_plane_z_m")
-                              if grasp_preview.get("adaptive")
-                              else (current_support_plane.z_m
-                                    if current_support_plane is not None else None)),
+        "support_plane_z_m": float(locked_plane_z),
         "orientation": list(grasp_preview.get("orientation", TOOL_ORIENTATION)),
     }
     if grasp_preview.get("adaptive"):
