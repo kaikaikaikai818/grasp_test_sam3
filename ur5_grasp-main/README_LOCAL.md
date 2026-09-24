@@ -1,5 +1,7 @@
 # 本地文字工具抓取入口
 
+最新实机进度、当前安全参数和下一次工作入口见 `PROGRESS_2026-09-24.md`。
+
 ## 2026 秋季阶段目标与当前可用范围
 
 阶段验收与国庆假期后的安排见 `PROJECT_ROADMAP_5_WEEKS.md`，最终日期为 2026-11-06。英文名称可在启动时传入，例如 `--prompt "screwdriver"`、`--prompt "adjustable wrench"`、`--prompt "tape measure"`、`--prompt "tape dispenser"` 或 `--prompt "rubber mallet"`；未配置过的英文名称也可以用于视觉识别。多工具同场时，模型按指定名称选择目标，但正确率仍须实测。
