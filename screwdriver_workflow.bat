@@ -19,7 +19,8 @@ echo 1. Collect first five-position dataset - robot stays still
 echo 2. Build one shared alignment candidate - no robot motion
 echo 3. Collect second independent dataset - robot stays still
 echo 4. Validate with the independent dataset
-echo 5. Test the high observation pose - press A to move
+echo 5. Test the high observation pose - press P when both cameras pass
+echo 6. Test high safe orientation - no descent or gripper action
 echo Q. Exit
 set "ACTION="
 set /p "ACTION=Select an option: "
@@ -31,7 +32,8 @@ if "%ACTION%"=="2" goto fit
 if "%ACTION%"=="3" goto collect_validate
 if "%ACTION%"=="4" goto validate
 if "%ACTION%"=="5" goto observe
-echo [ERROR] Invalid option. Enter 0, 1, 2, 3, 4, 5, or Q.
+if "%ACTION%"=="6" goto rotate
+echo [ERROR] Invalid option. Enter 0, 1, 2, 3, 4, 5, 6, or Q.
 goto menu
 
 :require_robot_modules
@@ -77,9 +79,21 @@ goto menu
 call :require_robot_modules
 if errorlevel 1 goto missing_modules
 echo [WARNING] This mode connects robot control.
-echo Press A only after the camera view is stable and the path is clear.
+echo Press P when both cameras show PASS and the path is clear.
+echo Press A only when D435i cannot initially see the tool.
 echo This mode does not descend and does not control the gripper.
 "%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "screwdriver" --stage observe --check-calib
+pause
+goto menu
+
+:rotate
+call :require_robot_modules
+if errorlevel 1 goto missing_modules
+echo [WARNING] This mode connects robot control.
+echo First press P at dual-camera PASS, then wait for D435i STABLE.
+echo Press Y once to align orientation at or above 250 mm.
+echo This mode does not descend and does not control the gripper.
+"%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "screwdriver" --stage rotate --check-calib
 pause
 goto menu
 

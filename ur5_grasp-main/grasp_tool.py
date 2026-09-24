@@ -777,7 +777,10 @@ def main():
                     hi_filter.reset()
                     angle_history.clear()
                     angle_rotation_completed = True
-                    print("[方向对齐] 已旋转；等待 D435i 重新定位后再按 D。")
+                    if args.stage == "rotate":
+                        print("[方向对齐] 已旋转；等待 D435i 重新稳定。本阶段不会下降。")
+                    else:
+                        print("[方向对齐] 已旋转；等待 D435i 重新定位后再按 D。")
     finally:
         if getattr(robot, "camera", None) is not None:
             robot.camera.stop()
