@@ -102,6 +102,10 @@ SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
 SCREWDRIVER_R_START_TOL_M = 0.015
 SUPPORT_PLANE_SHIFT_MAX_M = 0.008
 MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.008
+# The projected mask slightly overestimates this screwdriver's handle diameter.
+# Lower the TCP by 3 mm from the nominal cylinder midpoint while retaining the
+# independent 8 mm support-plane clearance gate below.
+SCREWDRIVER_GRASP_CENTER_BIAS_M = -0.003
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -1002,7 +1006,9 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
             return preview
         grasp_tcp_z, plan = plan_grasp_tcp(
             float(handle_thickness_m), float(fixed_plane_z),
-            float(calibration["gripper_offset_m"]))
+            float(calibration["gripper_offset_m"]),
+            center_bias_m=SCREWDRIVER_GRASP_CENTER_BIAS_M,
+            minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M)
         if isinstance(plan, dict):
             plan["live_support_plane_z_m"] = float(support_plane.z_m)
             plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
@@ -1472,9 +1478,12 @@ def move_to_safe_descent_test(robot, preview):
     orientation = preview.get("orientation", TOOL_ORIENTATION)
     if preview.get("plan") and "handle_thickness_m" in preview["plan"]:
         plan = preview["plan"]
-        print("[抓取几何] 手柄厚度=%.1fmm 手柄中段z=%.4f 夹爪偏移=%.1fmm 夹持TCP z=%.4f" % (
+        print("[抓取几何] 手柄厚度=%.1fmm 手柄中段z=%.4f 夹爪偏移=%.1fmm "
+              "向下修正=%.1fmm 夹持TCP z=%.4f" % (
             plan["handle_thickness_m"] * 1000.0, plan["handle_mid_z_m"],
-            plan["gripper_offset_m"] * 1000.0, plan["grasp_tcp_z_m"]))
+            plan["gripper_offset_m"] * 1000.0,
+            plan.get("applied_center_bias_m", 0.0) * 1000.0,
+            plan["grasp_tcp_z_m"]))
     if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
         print("[安全中止] 无接触下降路径超出工作空间。")
         return False

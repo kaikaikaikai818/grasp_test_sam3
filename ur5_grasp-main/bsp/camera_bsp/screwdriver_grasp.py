@@ -153,7 +153,8 @@ def estimate_handle_thickness(radius_px: float, depth_m: float,
 
 
 def plan_grasp_tcp(handle_thickness_m: float, support_plane_z_m: float,
-                   gripper_offset_m: float):
+                   gripper_offset_m: float, center_bias_m: float = 0.0,
+                   minimum_clearance_m: float = 0.0):
     """Grasp the handle at its mid height using a tool-independent gripper offset.
 
     ``gripper_offset_m`` is the constant vertical distance from the grasp point
@@ -161,7 +162,8 @@ def plan_grasp_tcp(handle_thickness_m: float, support_plane_z_m: float,
     thickness is re-estimated every attempt, so a different screwdriver does not
     need a new calibration.  Returns ``(tcp_z, plan)`` or ``(None, reason)``.
     """
-    values = np.asarray([handle_thickness_m, support_plane_z_m, gripper_offset_m], dtype=np.float64)
+    values = np.asarray([handle_thickness_m, support_plane_z_m, gripper_offset_m,
+                         center_bias_m, minimum_clearance_m], dtype=np.float64)
     if not np.all(np.isfinite(values)):
         return None, "non-finite handle thickness, support plane, or gripper offset"
     thickness = float(handle_thickness_m)
@@ -170,12 +172,19 @@ def plan_grasp_tcp(handle_thickness_m: float, support_plane_z_m: float,
     if thickness > 0.100:
         return None, "handle thickness is implausibly large"
     handle_mid_z = float(support_plane_z_m) + thickness / 2.0
-    tcp_z = handle_mid_z + float(gripper_offset_m)
+    nominal_tcp_z = handle_mid_z + float(gripper_offset_m)
+    requested_tcp_z = nominal_tcp_z + float(center_bias_m)
+    minimum_tcp_z = float(support_plane_z_m) + max(0.0, float(minimum_clearance_m))
+    tcp_z = max(requested_tcp_z, minimum_tcp_z)
     return tcp_z, {
         "handle_thickness_m": thickness,
         "support_plane_z_m": float(support_plane_z_m),
         "handle_mid_z_m": handle_mid_z,
         "gripper_offset_m": float(gripper_offset_m),
+        "nominal_grasp_tcp_z_m": nominal_tcp_z,
+        "requested_center_bias_m": float(center_bias_m),
+        "applied_center_bias_m": tcp_z - nominal_tcp_z,
+        "minimum_clearance_m": max(0.0, float(minimum_clearance_m)),
         "grasp_tcp_z_m": tcp_z,
     }
 

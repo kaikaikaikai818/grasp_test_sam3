@@ -98,6 +98,21 @@ class ScrewdriverGeometryTests(unittest.TestCase):
         self.assertIsNone(tcp_z)
         self.assertIn("small", reason)
 
+    def test_downward_center_bias_is_applied(self):
+        tcp_z, plan = plan_grasp_tcp(
+            0.0308, 0.0214, 0.0,
+            center_bias_m=-0.003, minimum_clearance_m=0.008)
+        self.assertAlmostEqual(tcp_z, 0.0338, places=4)
+        self.assertAlmostEqual(plan["applied_center_bias_m"], -0.003, places=4)
+
+    def test_downward_bias_never_crosses_clearance_floor(self):
+        tcp_z, plan = plan_grasp_tcp(
+            0.012, 0.0214, 0.0,
+            center_bias_m=-0.003, minimum_clearance_m=0.008)
+        self.assertAlmostEqual(tcp_z, 0.0294, places=4)
+        self.assertAlmostEqual(
+            tcp_z - plan["support_plane_z_m"], 0.008, places=4)
+
     def test_thick_handle_wins_over_thin_shaft(self):
         mask = np.zeros((100, 160), dtype=np.uint8)
         mask[45:55, 15:105] = 1        # shaft
