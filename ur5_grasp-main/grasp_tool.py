@@ -54,7 +54,8 @@ from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
                                                load_calibration, plan_grasp_tcp,
-                                               result_at_handle)
+                                               result_at_handle,
+                                               verified_support_plane_z)
 
 # -------------------------- 配置 --------------------------
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -99,6 +100,7 @@ SCREWDRIVER_TEST_LIFT_M = 0.050
 SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
 SCREWDRIVER_R_START_TOL_M = 0.015
 SUPPORT_PLANE_SHIFT_MAX_M = 0.008
+MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.010
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
     ord("1"): "center",
@@ -116,6 +118,9 @@ CAM_INI = str(SCRIPT_ROOT / "camera_20260906.ini")
 CAM2END_PATH = str(SCRIPT_ROOT / "cam2end_20260906.txt")
 CAMERA_ALIGNMENT_PATH = SCRIPT_ROOT / "camera_alignment.json"
 SCREWDRIVER_CALIBRATION_PATH = SCRIPT_ROOT / "grasp_surface_calibration.json"
+# The active controller TCP named TCP_clamp is already calibrated at the jaw
+# centre.  Therefore the jaw centre and commanded TCP share the same Z height.
+TCP_CLAMP_GRIP_CENTER_OFFSET_M = 0.0
 
 # 手外 D455 内参（与 camera_pose.txt 标定时所用一致）
 HO_FX = 386.471
@@ -291,17 +296,19 @@ def main():
     print("  当前目标: %s（双视场文字识别）。" % TEXT_PROMPT)
     screwdriver_calibration_error = None
     try:
-        screwdriver_calibration = load_calibration(SCREWDRIVER_CALIBRATION_PATH)
+        screwdriver_calibration = load_calibration(
+            SCREWDRIVER_CALIBRATION_PATH,
+            default_gripper_offset_m=TCP_CLAMP_GRIP_CENTER_OFFSET_M)
     except Exception as exc:
         screwdriver_calibration = None
         screwdriver_calibration_error = str(exc)
     if TEXT_PROMPT.strip().lower() == "a screwdriver":
         if screwdriver_calibration is None:
-            print("  [螺丝刀抓取锁定] 尚未完成深度标定：运行 calibrate_screwdriver_grasp.py plane/contact。")
+            print("  [螺丝刀抓取锁定] 尚未保存固定支撑面：运行 calibrate_screwdriver_grasp.py plane。")
             if screwdriver_calibration_error:
                 print("      标定文件读取失败：%s" % screwdriver_calibration_error)
         else:
-            print("  [螺丝刀标定] 已加载：支撑面 z=%.4fm。R 键仍需 ENABLE_SCREWDRIVER_GRASP=True。" %
+            print("  [螺丝刀标定] 已加载：固定支撑面 z=%.4fm，夹持中心使用活动TCP_clamp。" %
                   screwdriver_calibration["support_plane_z_m"])
     if ENABLE_SAFE_APPROACH_TEST:
         print("  P -> 仅到安全观察点：先升至 %.0fmm，再摆正并水平移动到目标上方；不会下降或控制夹爪"
@@ -969,9 +976,17 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
                 "profile_grasp": True}
     elif (calibration is not None and support_plane is not None
             and handle_thickness_m is not None):
+        fixed_plane_z, plane_reason = verified_support_plane_z(
+            support_plane, calibration, SUPPORT_PLANE_SHIFT_MAX_M)
+        if fixed_plane_z is None:
+            preview["reason"] = plane_reason
+            return preview
         grasp_tcp_z, plan = plan_grasp_tcp(
-            float(handle_thickness_m), float(support_plane.z_m),
+            float(handle_thickness_m), float(fixed_plane_z),
             float(calibration["gripper_offset_m"]))
+        if isinstance(plan, dict):
+            plan["live_support_plane_z_m"] = float(support_plane.z_m)
+            plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
 
     if grasp_tcp_z is None:
         # Fall back to a visual-only preview (no adaptive grasp geometry).
@@ -1517,8 +1532,10 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
     final = target.copy()
     final[2] = float(grasp_tcp_z)
     plane_clearance = final[2] - float(support_plane_z_m)
-    if plane_clearance < 0.003:
-        print("[安全中止] 夹持TCP离支撑面仅 %.1fmm，过低，拒绝执行。" % (plane_clearance * 1000.0))
+    if plane_clearance < MIN_GRASP_TCP_PLANE_CLEARANCE_M:
+        print("[安全中止] 夹持TCP离支撑面仅 %.1fmm（至少需要 %.1fmm），拒绝执行。" %
+              (plane_clearance * 1000.0,
+               MIN_GRASP_TCP_PLANE_CLEARANCE_M * 1000.0))
         return False
     retreat = final.copy()
     retreat[2] += SAFE_DESCENT_CLEARANCE_M
@@ -1592,8 +1609,10 @@ def attempt_descent(robot, grasp_preview, current_support_plane):
         return None
     locked = {
         "target_base_xyz_m": list(grasp_preview["target_surface_xyz_m"]),
-        "support_plane_z_m": (current_support_plane.z_m
-                              if current_support_plane is not None else None),
+        "support_plane_z_m": ((grasp_preview.get("plan") or {}).get("support_plane_z_m")
+                              if grasp_preview.get("adaptive")
+                              else (current_support_plane.z_m
+                                    if current_support_plane is not None else None)),
         "orientation": list(grasp_preview.get("orientation", TOOL_ORIENTATION)),
     }
     if grasp_preview.get("adaptive"):
@@ -1624,7 +1643,7 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
         return "failed", "手柄目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
     ok = execute_screwdriver_grasp(
         robot, locked_target, float(locked_handle["grasp_tcp_z_m"]),
-        current_support_plane.z_m, calibration,
+        float(locked_plane_z), calibration,
         orientation=locked_handle.get("orientation", TOOL_ORIENTATION),
         grip_profile=grip_profile)
     return ("done", None) if ok else ("failed", "夹持未完成（力矩或姿态未通过）。")

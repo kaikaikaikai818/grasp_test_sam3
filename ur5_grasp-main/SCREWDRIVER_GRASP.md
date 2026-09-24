@@ -1,6 +1,6 @@
 # 平放螺丝刀：标定与自适应抓取
 
-流程用 D435i 深度拟合支撑面（桌面或底板），并用“投影宽度估出的手柄直径 + 一次性夹爪偏移”自动算出夹持高度，因此换不同大小的螺丝刀不需要重标定。
+流程用 D435i 深度拟合支撑面（桌面或底板），并用“投影宽度估出的手柄直径 + 已标定活动TCP_clamp”自动算出夹持高度，因此换不同大小的螺丝刀不需要重标定。
 
 ## 一次性标定
 
@@ -12,28 +12,11 @@ python ur5_grasp-main\calibrate_screwdriver_grasp.py plane
 
 移开螺丝刀，让相机只看空支撑面（桌面/底板）。点击画面后按小写 `s` 保存。这个程序只读相机和 TCP，不会移动机械臂或控制夹爪。
 
-放回螺丝刀，用示教器把**张开的夹爪**手动放到螺丝刀手柄中段的目标夹持高度。然后执行：
-
-```powershell
-python ur5_grasp-main\calibrate_screwdriver_grasp.py contact
-```
-
-当画面显示 `HANDLE STABLE`，确认绿色 mask 盖住手柄（状态行 `top/median` 相差约一个手柄半径、`D~` 接近真实直径），点击画面后按小写 `k` 保存。脚本会估算手柄直径并计算“夹爪偏移”；若估算直径不在 10–100mm 会拒绝保存。配置保存在本机 `grasp_surface_calibration.json`，不会上传 GitHub。
+画面显示的支撑面高度应与实测高度相符，再按小写 `s` 保存。配置保存在本机 `grasp_surface_calibration.json`，不会上传 GitHub。活动TCP必须使用已经标定在夹持中心的 `TCP_clamp`；无需再运行 `contact` 标定。
 
 ## 抓取测试
 
-在 `grasp_tool.py` 中设置：
-
-```python
-TEXT_PROMPT = "a screwdriver"
-ENABLE_ROBOT_GRASP = False
-ENABLE_SAFE_APPROACH_TEST = True
-ENABLE_SAFE_DESCENT_TEST = True
-ENABLE_SCREWDRIVER_GRASP = True
-ENABLE_ONE_KEY_GRASP = True
-```
-
-重新运行程序。
+运行 `screwdriver_workflow.bat` 并选择菜单 `9`。该菜单是实际夹持验收入口；最终主程序不会保留这些分步按键。
 
 **一键抓取（推荐）**
 

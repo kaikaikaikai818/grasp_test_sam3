@@ -183,16 +183,43 @@ def save_calibration(path: Path, calibration: dict) -> None:
     path.write_text(json.dumps(calibration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def load_calibration(path: Path) -> Optional[dict]:
+def load_calibration(path: Path, default_gripper_offset_m: Optional[float] = None) -> Optional[dict]:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    required = {"support_plane_z_m", "support_plane_spread_m", "contact_offset_m",
-                "minimum_tcp_plane_clearance_m", "handle_surface_above_plane_m",
-                "gripper_offset_m"}
+    required = {"support_plane_z_m", "support_plane_spread_m"}
     if not required.issubset(data):
-        raise ValueError("grasp calibration missing required fields")
+        raise ValueError("support-plane calibration missing required fields")
+    plane_z = float(data["support_plane_z_m"])
+    plane_spread = float(data["support_plane_spread_m"])
+    if not np.isfinite(plane_z) or not np.isfinite(plane_spread):
+        raise ValueError("support-plane calibration contains non-finite values")
+    if not (-0.2 <= plane_z <= 0.6):
+        raise ValueError("support-plane calibration is outside the robot workspace")
+    if not (0.0 <= plane_spread <= 0.008):
+        raise ValueError("support-plane calibration spread exceeds 8 mm")
+    if default_gripper_offset_m is not None:
+        data["gripper_offset_m"] = float(default_gripper_offset_m)
+        data["gripper_offset_source"] = "active_tcp_clamp"
+    elif "gripper_offset_m" not in data:
+        raise ValueError("gripper offset is missing and no TCP-clamp default was provided")
+    if not np.isfinite(float(data["gripper_offset_m"])):
+        raise ValueError("gripper offset is not finite")
     return data
+
+
+def verified_support_plane_z(live_plane: Optional[SupportPlane], calibration: Optional[dict],
+                             max_shift_m: float = 0.008):
+    """Use the saved fixed plane only when live D435i depth agrees with it."""
+    if live_plane is None:
+        return None, "live support plane unavailable"
+    if calibration is None or "support_plane_z_m" not in calibration:
+        return None, "fixed support plane is not calibrated"
+    reference = float(calibration["support_plane_z_m"])
+    delta = abs(float(live_plane.z_m) - reference)
+    if delta > float(max_shift_m):
+        return None, "live support plane differs from saved plane by %.1fmm" % (delta * 1000.0)
+    return reference, None
 
 
 def plane_to_dict(plane: SupportPlane) -> dict:

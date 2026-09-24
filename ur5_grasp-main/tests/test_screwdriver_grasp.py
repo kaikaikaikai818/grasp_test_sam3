@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -9,7 +11,9 @@ from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
                                                estimate_handle_thickness,
                                                find_screwdriver_handle,
                                                fit_horizontal_support_plane,
+                                               load_calibration,
                                                plan_grasp_tcp)
+from bsp.camera_bsp.screwdriver_grasp import SupportPlane, verified_support_plane_z
 
 
 class ScrewdriverGeometryTests(unittest.TestCase):
@@ -22,6 +26,40 @@ class ScrewdriverGeometryTests(unittest.TestCase):
     def test_invalid_camera_transform_result_is_rejected(self):
         with self.assertRaises(ValueError):
             base_point_m(np.array([0.0, 0.0, 0.019]))
+
+    def test_plane_only_calibration_uses_tcp_clamp_center(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plane.json"
+            path.write_text(json.dumps({
+                "support_plane_z_m": 0.0215,
+                "support_plane_spread_m": 0.0055,
+            }), encoding="utf-8")
+            calibration = load_calibration(path, default_gripper_offset_m=0.0)
+        self.assertEqual(calibration["gripper_offset_m"], 0.0)
+        self.assertEqual(calibration["gripper_offset_source"], "active_tcp_clamp")
+
+    def test_tcp_clamp_center_overrides_legacy_contact_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plane.json"
+            path.write_text(json.dumps({
+                "support_plane_z_m": 0.0215,
+                "support_plane_spread_m": 0.0055,
+                "gripper_offset_m": 0.012,
+            }), encoding="utf-8")
+            calibration = load_calibration(path, default_gripper_offset_m=0.0)
+        self.assertEqual(calibration["gripper_offset_m"], 0.0)
+        self.assertEqual(calibration["gripper_offset_source"], "active_tcp_clamp")
+
+    def test_saved_fixed_plane_requires_live_agreement(self):
+        calibration = {"support_plane_z_m": 0.0215}
+        accepted, reason = verified_support_plane_z(
+            SupportPlane(0.0240, 0.001, 100), calibration)
+        self.assertAlmostEqual(accepted, 0.0215)
+        self.assertIsNone(reason)
+        rejected, reason = verified_support_plane_z(
+            SupportPlane(0.0400, 0.001, 100), calibration)
+        self.assertIsNone(rejected)
+        self.assertIn("differs", reason)
 
     def test_handle_diameter_from_projected_width(self):
         # A 30 mm cylinder at 0.25 m with f=600 px projects to a 36 px radius.
