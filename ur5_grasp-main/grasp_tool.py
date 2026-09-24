@@ -279,7 +279,6 @@ def main():
     safe_descent_completed = False
     grasp_completed = False
     orientation_return_completed = False
-    cross_camera_mismatch_latched = False
     last_log_time = 0.0
     active_position = None
     position_counts = {label: 0 for label in POSITION_LABELS.values()}
@@ -465,14 +464,6 @@ def main():
             association = associate_targets(
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
                 alignment_applied=camera_alignment is not None)
-            if (camera_alignment is not None and association.get("available")
-                    and association.get("distance_m") is not None
-                    and float(association["distance_m"])
-                    > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M):
-                if not cross_camera_mismatch_latched:
-                    print("[安全锁定] 双相机实时坐标差超过15mm；本次运行不再允许运动，请检查目标对应和相机安装。")
-                cross_camera_mismatch_latched = True
-            association["runtime_mismatch_latched"] = cross_camera_mismatch_latched
             state["association"] = association
             if current_axis is None:
                 angle_history.clear()
@@ -884,8 +875,6 @@ def safe_approach_candidate(association):
     """
     if not association or not association.get("available"):
         return None, "waiting for both cameras"
-    if association.get("runtime_mismatch_latched"):
-        return None, "cross-camera mismatch latched; restart after inspection"
     if not association.get("alignment_applied"):
         return None, "camera alignment file not loaded"
     if not association.get("matched"):
@@ -918,8 +907,6 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied,
         return None, "waiting for stable D455 target"
     if not alignment_applied:
         return None, "camera alignment file not loaded"
-    if association and association.get("runtime_mismatch_latched"):
-        return None, "cross-camera mismatch latched; restart after inspection"
     if (association and association.get("available")
             and association.get("distance_m") is not None
             and float(association["distance_m"])
