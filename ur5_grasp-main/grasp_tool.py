@@ -96,6 +96,12 @@ TARGET_ASSOCIATION_MAX_DISTANCE_M = 0.10
 APPROACH_HEIGHT_M = 0.15
 # P 键运动的独立安全门槛：必须连续三帧双相机一致到 15mm 内。
 SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M = 0.015
+# Two cameras can select different points along an elongated screwdriver
+# handle.  Keep cross-axis and height agreement strict while allowing a small
+# along-axis offset for same-object association.
+SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M = 0.040
+SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M = 0.015
+SCREWDRIVER_ASSOCIATION_Z_MAX_M = 0.015
 SAFE_APPROACH_CONFIRM_FRAMES = 3
 SAFE_TRAVEL_Z_M = 0.25
 SAFE_APPROACH_SPEED = 0.03
@@ -555,7 +561,8 @@ def main():
                         "PASS" if hi_gate["passed"] else "REJECT", coord_name, x, y, z)
             association = associate_targets(
                 state["ho_base_aligned"], state["hi_base"], ho_gate, hi_gate,
-                alignment_applied=camera_alignment is not None)
+                alignment_applied=camera_alignment is not None,
+                tool_category=tool_category, tool_axis_rad=current_axis)
             state["association"] = association
             if current_axis is None:
                 angle_history.clear()
@@ -937,7 +944,8 @@ def draw_header(image, camera_name, status, coordinate=None, gate_reason=None,
                     0.46, color, 1, cv2.LINE_AA)
 
 
-def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=False):
+def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=False,
+                      tool_category=None, tool_axis_rad=None):
     """Compare independent base-frame estimates; never authorize robot motion."""
     result = {
         "available": False,
@@ -947,6 +955,10 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         "approach_base_xyz_m": None,
         "robot_motion_authorized": False,
         "alignment_applied": bool(alignment_applied),
+        "safe_approach_matched": False,
+        "axial_distance_m": None,
+        "lateral_distance_m": None,
+        "vertical_distance_m": None,
     }
     if not (ho_gate["passed"] and hi_gate["passed"]):
         result["reason"] = "waiting for both validation gates"
@@ -955,7 +967,10 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         result["reason"] = "read-only TCP unavailable"
         return result
 
-    distance = float(np.linalg.norm(np.asarray(ho_base) - np.asarray(hi_base)))
+    ho = np.asarray(ho_base, dtype=np.float64).reshape(3)
+    hi = np.asarray(hi_base, dtype=np.float64).reshape(3)
+    delta = hi - ho
+    distance = float(np.linalg.norm(delta))
     result["available"] = True
     result["distance_m"] = distance
     result["matched"] = distance <= TARGET_ASSOCIATION_MAX_DISTANCE_M
@@ -963,7 +978,25 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         result["reason"] = "base coordinates disagree"
         return result
 
-    target = np.asarray(hi_base, dtype=np.float64)
+    if tool_category == "screwdriver" and tool_axis_rad is not None:
+        axis = np.asarray([np.cos(float(tool_axis_rad)),
+                           np.sin(float(tool_axis_rad))], dtype=np.float64)
+        lateral_axis = np.asarray([-axis[1], axis[0]], dtype=np.float64)
+        axial = abs(float(np.dot(delta[:2], axis)))
+        lateral = abs(float(np.dot(delta[:2], lateral_axis)))
+        vertical = abs(float(delta[2]))
+        result["axial_distance_m"] = axial
+        result["lateral_distance_m"] = lateral
+        result["vertical_distance_m"] = vertical
+        result["safe_approach_matched"] = bool(
+            axial <= SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M
+            and lateral <= SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M
+            and vertical <= SCREWDRIVER_ASSOCIATION_Z_MAX_M)
+    else:
+        result["safe_approach_matched"] = bool(
+            distance <= SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M)
+
+    target = hi
     approach = target.copy()
     approach[2] = min(target[2] + APPROACH_HEIGHT_M, WORKSPACE_LIMITS[2][1])
     result["target_base_xyz_m"] = target.tolist()
@@ -978,13 +1011,19 @@ def association_status_text(association, safe_approach_mode=False,
         return "ASSOCIATION WAITING: " + association.get("reason", "unavailable")
     distance_mm = association["distance_m"] * 1000.0
     source = "aligned" if association.get("alignment_applied") else "raw"
+    components = ""
+    if association.get("axial_distance_m") is not None:
+        components = " axial=%.1f lateral=%.1f z=%.1fmm" % (
+            association["axial_distance_m"] * 1000.0,
+            association["lateral_distance_m"] * 1000.0,
+            association["vertical_distance_m"] * 1000.0)
     if safe_approach_mode:
         if approach_reason is None and ready_streak >= SAFE_APPROACH_CONFIRM_FRAMES:
-            return "APPROACH READY %d/%d  delta=%.1fmm  press P" % (
-                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm)
+            return "APPROACH READY %d/%d delta=%.1fmm%s press P" % (
+                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm, components)
         if approach_reason is None:
-            return "APPROACH CHECK %d/%d  delta=%.1fmm" % (
-                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm)
+            return "APPROACH CHECK %d/%d delta=%.1fmm%s" % (
+                ready_streak, SAFE_APPROACH_CONFIRM_FRAMES, distance_mm, components)
         return "APPROACH LOCKED: " + approach_reason
     if association["matched"]:
         return "SAME TARGET  %s delta=%.1fmm  preview only" % (source, distance_mm)
@@ -1010,8 +1049,9 @@ def safe_approach_candidate(association):
         return None, "camera alignment file not loaded"
     if not association.get("matched"):
         return None, "two cameras do not identify one target"
-    distance = association.get("distance_m")
-    if distance is None or float(distance) > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M:
+    if not association.get("safe_approach_matched", False):
+        if association.get("axial_distance_m") is not None:
+            return None, "screwdriver axial/lateral/Z camera delta exceeds limit"
         return None, "camera delta exceeds %.0fmm" % (
             SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0)
     target = association.get("target_base_xyz_m")
@@ -1039,9 +1079,9 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied,
     if not alignment_applied:
         return None, "camera alignment file not loaded"
     if (association and association.get("available")
-            and association.get("distance_m") is not None
-            and float(association["distance_m"])
-            > SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M):
+            and not association.get("safe_approach_matched", False)):
+        if association.get("axial_distance_m") is not None:
+            return None, "live screwdriver axial/lateral/Z camera delta exceeds limit"
         return None, "live cross-camera delta exceeds %.0fmm" % (
             SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0)
     target = np.asarray(ho_base_aligned, dtype=np.float64)
