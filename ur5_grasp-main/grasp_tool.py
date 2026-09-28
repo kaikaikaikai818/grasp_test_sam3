@@ -78,6 +78,10 @@ STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为
 # 视觉验收门槛。这里只决定坐标是否值得记录，不会授权机械臂运动。
 D455_MIN_SCORE = 0.35
 D435I_MIN_SCORE = 0.45
+# The tape case remains geometrically strong at the wrist camera even when its
+# CLIPSeg confidence dips after a view/angle change.  Keep D455 coarse
+# confirmation at the shared threshold and relax only the D435i tape gate.
+D435I_TOOL_MIN_SCORES = {"tape measure": 0.40}
 MIN_BOX_SIDE_PX = 12
 MIN_VALID_DEPTH_POINTS = 80
 MEASUREMENT_LOG_INTERVAL_S = 2.0
@@ -417,7 +421,8 @@ def main():
                         res_ho["center"] = candidate.center_px
                         res_ho["z_mm"] = candidate.depth_m * 1000.0
                 ho_disp = detector.draw(ho_color, res_ho)
-                ho_gate = gate_detection(res_ho, ho_status, "D455")
+                ho_gate = gate_detection(
+                    res_ho, ho_status, "D455", tool_category=tool_category)
                 if ho_handle_reason is not None and ho_handle is None:
                     ho_gate = {"passed": False, "reasons": [ho_handle_reason]}
                 if (res_ho is not None and ho_status == "STABLE"
@@ -429,7 +434,9 @@ def main():
                         state["ho_base_aligned"] = (
                             apply_alignment(state["ho_base"], camera_alignment)
                             if camera_alignment is not None else state["ho_base"])
-                        ho_gate = gate_detection(res_ho, ho_status, "D455", state["ho_base"])
+                        ho_gate = gate_detection(
+                            res_ho, ho_status, "D455", state["ho_base"],
+                            tool_category=tool_category)
                         ax, ay, az = state["ho_base_aligned"]
                         coord_kind = "aligned" if camera_alignment is not None else "raw"
                         ho_coord = "%s  %s [%.3f, %.3f, %.3f]" % (
@@ -454,7 +461,8 @@ def main():
             support_plane_reason = None
             current_axis = None
             current_orientation = None
-            hi_gate = gate_detection(None, hi_status, "D435I")
+            hi_gate = gate_detection(
+                None, hi_status, "D435I", tool_category=tool_category)
             if hi_color is not None:
                 raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
                 res_hi, hi_status = hi_filter.update(raw_hi)
@@ -472,7 +480,8 @@ def main():
                         res_hi["center"] = candidate.center_px
                         res_hi["z_mm"] = candidate.depth_m * 1000.0
                 hi_disp = detector.draw(hi_color, res_hi)
-                hi_gate = gate_detection(res_hi, hi_status, "D435I")
+                hi_gate = gate_detection(
+                    res_hi, hi_status, "D435I", tool_category=tool_category)
                 if hi_handle_reason is not None and hi_handle is None:
                     hi_gate = {"passed": False, "reasons": [hi_handle_reason]}
                 if (res_hi is not None and res_hi["z_mm"] is not None
@@ -490,7 +499,8 @@ def main():
                             z += HI_Z_OFFSET
                             state["hi_base"] = (x, y, z)
                             hi_gate = gate_detection(
-                                res_hi, hi_status, "D435I", state["hi_base"])
+                                res_hi, hi_status, "D435I", state["hi_base"],
+                                tool_category=tool_category)
                             def hi_pixel_to_base(u, v, depth_m):
                                 point_camera_mm = robot.pixel_to_camera(u, v, depth_m * 1000.0)
                                 return base_point_m(robot.camera_to_base(
@@ -870,8 +880,14 @@ def main():
             elif key == ord('y'):
                 if not args.enable_angle_rotation or not observation_active:
                     print("[安全锁定] 使用 --stage rotate 或后续阶段并先到达观察点。")
-                elif not (angle_stable and current_orientation and grasp_preview.get("ready")):
-                    print("[安全锁定] D435i 方向或抓取预览尚未稳定。")
+                elif not hi_gate["passed"]:
+                    print("[安全锁定] D435i检测门槛未通过：%s。" %
+                          ", ".join(hi_gate["reasons"]))
+                elif not (angle_stable and current_orientation):
+                    print("[安全锁定] 卷尺壳体方向尚未连续稳定。")
+                elif not grasp_preview.get("ready"):
+                    print("[安全锁定] 抓取预览未就绪：%s。" %
+                          grasp_preview.get("reason", "unknown"))
                 elif rotate_to_planar_orientation(robot, current_orientation):
                     hi_filter.reset()
                     angle_history.clear()
@@ -1223,14 +1239,16 @@ def draw_grasp_preview(image, result, preview, locked_pixel=None):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
 
-def gate_detection(result, tracking_status, camera_name, base_xyz=None):
+def gate_detection(result, tracking_status, camera_name, base_xyz=None,
+                   tool_category=None):
     """Check whether a stable visual result is trustworthy enough to record."""
     reasons = []
     if tracking_status != "STABLE" or result is None:
         reasons.append("not stable")
         return {"passed": False, "reasons": reasons}
 
-    min_score = D455_MIN_SCORE if camera_name == "D455" else D435I_MIN_SCORE
+    min_score = (D455_MIN_SCORE if camera_name == "D455"
+                 else D435I_TOOL_MIN_SCORES.get(tool_category, D435I_MIN_SCORE))
     if float(result.get("score", 0.0)) < min_score:
         reasons.append("score < %.2f" % min_score)
     x1, y1, x2, y2 = result.get("box", (0, 0, 0, 0))
