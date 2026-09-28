@@ -170,9 +170,8 @@ GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
 GRIP_OPEN_SPEED = 100
 GRIP_OPEN_FORCE = 40
 # 螺丝刀使用力度30的低力夹持。实机细手柄接触时可能只报告约38的实时力矩，
-# 因此使用30作为下限，并同时要求夹爪被物体阻挡、没有完全到达闭合终点。
+# 因此使用30作为下限。夹爪的 position 寄存器会回显命令值，不能用于判断接触。
 GRIP_TORQUE_MIN = 30
-GRIP_BLOCKED_POSITION_MIN = 200
 # 卷尺首次实体抓取只使用已经通过螺丝刀实测的闭合终点，并进一步降低力度。
 # 该模式仍要求 P -> D -> R，且只抬升 50mm；失败会自动张开并退回。
 TAPE_MEASURE_TEST_CLOSE_POS = 11000
@@ -1743,14 +1742,12 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
             raise RuntimeError("gripper did not close")
         torque_reached = robot.read_torque_reached()
         torque_current = robot.read_torque_current()
-        contact_confirmed, position_shortfall = grip_contact_confirmed(
-            torque_reached, torque_current, closed_position, close_position,
-            torque_min)
+        contact_confirmed = grip_contact_confirmed(
+            torque_reached, torque_current, torque_min)
         if not contact_confirmed:
-            print("[夹持失败] reached=%s torque=%s position=%s shortfall=%s；"
+            print("[夹持失败] reached=%s torque=%s command_position=%s；"
                   "张开并退回安全高度，不抬升工具。" %
-                  (torque_reached, torque_current, closed_position,
-                   position_shortfall))
+                  (torque_reached, torque_current, closed_position))
             robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
             robot.moveL(retreat.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                         acceleration=SCREWDRIVER_GRASP_SPEED)
@@ -1763,10 +1760,9 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
             return False
         robot.moveL(lift.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        print("[%s抓取完成] reached=%s torque=%s position=%s shortfall=%s；"
+        print("[%s抓取完成] reached=%s torque=%s command_position=%s；"
               "已低力夹持并抬升 %.0fmm，停在抬升位置。"
               % (tool_label, torque_reached, torque_current, closed_position,
-                 position_shortfall,
                  SCREWDRIVER_TEST_LIFT_M * 1000.0))
         return True
     except Exception as exc:
@@ -1779,15 +1775,10 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
         return False
 
 
-def grip_contact_confirmed(torque_reached, torque_current, actual_position,
-                           commanded_position, torque_min,
-                           blocked_position_min=GRIP_BLOCKED_POSITION_MIN):
-    """Confirm contact without treating normal empty-gripper current as a grasp."""
-    position_shortfall = max(0, int(commanded_position) - int(actual_position))
-    contact = (int(torque_reached) == 1 or
-               (int(torque_current) >= int(torque_min) and
-                position_shortfall >= int(blocked_position_min)))
-    return contact, position_shortfall
+def grip_contact_confirmed(torque_reached, torque_current, torque_min):
+    """Confirm low-force contact from the gripper's torque feedback."""
+    return (int(torque_reached) == 1 or
+            int(torque_current) >= int(torque_min))
 
 
 def attempt_descent(robot, grasp_preview, current_support_plane, calibration=None):
