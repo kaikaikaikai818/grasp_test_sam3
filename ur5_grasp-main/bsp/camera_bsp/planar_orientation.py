@@ -40,7 +40,8 @@ def principal_axis_base(mask, depth_m, pixel_to_base, stride=4,
 
 
 def overhead_orientation(tool_axis_rad, current_rvec,
-                         reference_rvec=(np.pi, 0.0, 0.0)):
+                         reference_rvec=(np.pi, 0.0, 0.0),
+                         quarter_turn_symmetric=False):
     """Orient closing axis across tool axis; keep the reference downward tilt.
 
     The reference gripper closes along base X, as confirmed for this setup.
@@ -51,7 +52,14 @@ def overhead_orientation(tool_axis_rad, current_rvec,
     reference, _ = cv2.Rodrigues(np.asarray(reference_rvec, dtype=float).reshape(3, 1))
     current, _ = cv2.Rodrigues(np.asarray(current_rvec, dtype=float).reshape(3, 1))
     candidates = []
-    for yaw in (tool_axis_rad + np.pi / 2, tool_axis_rad - np.pi / 2):
+    yaws = [tool_axis_rad + np.pi / 2, tool_axis_rad - np.pi / 2]
+    if quarter_turn_symmetric:
+        # A compact, nearly square case can be held across either pair of
+        # opposite sides.  These additional candidates keep the wrist within
+        # 45 degrees of its current yaw instead of forcing a needless 90-degree
+        # turn to use one arbitrarily selected case axis.
+        yaws.extend([tool_axis_rad, tool_axis_rad + np.pi])
+    for yaw in yaws:
         c, s = np.cos(yaw), np.sin(yaw)
         around_z = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
         target = around_z @ reference
@@ -62,5 +70,6 @@ def overhead_orientation(tool_axis_rad, current_rvec,
     return min(candidates, key=lambda item: item[0])[1].tolist()
 
 
-def axial_difference_deg(a, b):
-    return float(np.degrees(abs((a - b + np.pi / 2) % np.pi - np.pi / 2)))
+def axial_difference_deg(a, b, quarter_turn_symmetric=False):
+    period = np.pi / 2 if quarter_turn_symmetric else np.pi
+    return float(np.degrees(abs((a - b + period / 2) % period - period / 2)))

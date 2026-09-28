@@ -516,7 +516,9 @@ def main():
                                 if current_axis is not None:
                                     angle_history.append(current_axis)
                                     current_orientation = overhead_orientation(
-                                        current_axis, tcp_pose[3:6], TOOL_ORIENTATION)
+                                        current_axis, tcp_pose[3:6], TOOL_ORIENTATION,
+                                        quarter_turn_symmetric=(
+                                            tool_category == "tape measure"))
                                 else:
                                     angle_history.clear()
                             if tool_category is not None:
@@ -538,9 +540,12 @@ def main():
             state["association"] = association
             if current_axis is None:
                 angle_history.clear()
-            angle_stable = (len(angle_history) == angle_history.maxlen and
-                            all(axial_difference_deg(angle_history[0], item)
-                                <= ANGLE_STABLE_DEG for item in angle_history))
+            angle_stable = (
+                len(angle_history) == angle_history.maxlen
+                and all(axial_difference_deg(
+                    angle_history[0], item,
+                    quarter_turn_symmetric=(tool_category == "tape measure"))
+                    <= ANGLE_STABLE_DEG for item in angle_history))
             approach_destination, approach_reason = safe_approach_candidate(association)
             if ENABLE_SAFE_APPROACH_TEST and approach_destination is not None:
                 approach_ready_streak += 1

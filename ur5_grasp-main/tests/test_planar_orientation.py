@@ -38,6 +38,26 @@ class PlanarOrientationTests(unittest.TestCase):
         self.assertAlmostEqual(abs(target[0, 0]), 0.0, places=5)
         self.assertAlmostEqual(target[2, 2], -1.0, places=5)
 
+    def test_square_tool_chooses_nearest_of_two_grasp_axes(self):
+        # With the current wrist at zero yaw and a case axis at zero, the
+        # ordinary elongated-tool rule turns 90 degrees.  A square case can use
+        # the other pair of sides and therefore requires no yaw change.
+        ordinary = overhead_orientation(0.0, [np.pi, 0, 0])
+        square = overhead_orientation(
+            0.0, [np.pi, 0, 0], quarter_turn_symmetric=True)
+        ordinary_matrix, _ = cv2.Rodrigues(np.asarray(ordinary))
+        square_matrix, _ = cv2.Rodrigues(np.asarray(square))
+        self.assertAlmostEqual(abs(ordinary_matrix[0, 0]), 0.0, places=5)
+        self.assertAlmostEqual(square_matrix[0, 0], 1.0, places=5)
+        self.assertAlmostEqual(square_matrix[2, 2], -1.0, places=5)
+
+    def test_square_axis_stability_treats_ninety_degree_flip_as_equivalent(self):
+        self.assertAlmostEqual(
+            axial_difference_deg(0.0, np.pi / 2,
+                                 quarter_turn_symmetric=True),
+            0.0, places=5)
+        self.assertGreater(axial_difference_deg(0.0, np.pi / 2), 80.0)
+
 
 if __name__ == "__main__":
     unittest.main()
