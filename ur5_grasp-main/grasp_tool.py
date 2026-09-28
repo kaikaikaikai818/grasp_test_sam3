@@ -166,6 +166,9 @@ GRIP_TORQUE_MIN = 80          # 实时力矩(0x060C)阈值: 低于此且力矩�
 TAPE_MEASURE_TEST_CLOSE_POS = 11000
 TAPE_MEASURE_TEST_GRIP_FORCE = 20
 TAPE_MEASURE_TEST_TORQUE_MIN = 80
+# 实机侧视确认卷尺夹持点高于壳体中部。只修正卷尺夹持中心，并由通用
+# 8mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
+TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
@@ -1040,6 +1043,7 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
         grasp_tcp_z, plan = plan_tape_measure_grasp(
             float(target[2]), float(fixed_plane_z),
             float(calibration["gripper_offset_m"]),
+            center_bias_m=TAPE_MEASURE_GRASP_CENTER_BIAS_M,
             minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M)
         if grasp_tcp_z is None:
             preview["reason"] = plan
@@ -1548,9 +1552,10 @@ def move_to_safe_descent_test(robot, preview):
     elif preview.get("plan") and "body_thickness_m" in preview["plan"]:
         plan = preview["plan"]
         print("[卷尺抓取几何] 顶面z=%.4f 固定支撑面=%.4f 厚度=%.1fmm "
-              "中线z=%.4f 夹持TCP z=%.4f" % (
+              "中线z=%.4f 向下修正=%.1fmm 夹持TCP z=%.4f" % (
             plan["body_top_z_m"], plan["support_plane_z_m"],
             plan["body_thickness_m"] * 1000.0, plan["body_mid_z_m"],
+            plan["applied_center_bias_m"] * 1000.0,
             plan["grasp_tcp_z_m"]))
     if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
         print("[安全中止] 无接触下降路径超出工作空间。")

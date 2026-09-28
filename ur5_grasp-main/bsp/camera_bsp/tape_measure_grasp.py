@@ -6,6 +6,7 @@ import numpy as np
 
 def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
                             gripper_offset_m: float = 0.0,
+                            center_bias_m: float = 0.0,
                             minimum_clearance_m: float = 0.008,
                             minimum_thickness_m: float = 0.015,
                             maximum_thickness_m: float = 0.100):
@@ -17,7 +18,7 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
     per-tool calibration value.
     """
     values = np.asarray([
-        body_top_z_m, support_plane_z_m, gripper_offset_m,
+        body_top_z_m, support_plane_z_m, gripper_offset_m, center_bias_m,
         minimum_clearance_m, minimum_thickness_m, maximum_thickness_m,
     ], dtype=np.float64)
     if not np.all(np.isfinite(values)):
@@ -33,8 +34,9 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
 
     body_mid_z = float(support_plane_z_m) + thickness / 2.0
     nominal_tcp_z = body_mid_z + float(gripper_offset_m)
+    requested_tcp_z = nominal_tcp_z + float(center_bias_m)
     minimum_tcp_z = float(support_plane_z_m) + max(0.0, float(minimum_clearance_m))
-    tcp_z = max(nominal_tcp_z, minimum_tcp_z)
+    tcp_z = max(requested_tcp_z, minimum_tcp_z)
     return tcp_z, {
         "tool_category": "tape measure",
         "body_top_z_m": float(body_top_z_m),
@@ -43,6 +45,8 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
         "support_plane_z_m": float(support_plane_z_m),
         "gripper_offset_m": float(gripper_offset_m),
         "nominal_grasp_tcp_z_m": nominal_tcp_z,
+        "requested_center_bias_m": float(center_bias_m),
+        "applied_center_bias_m": tcp_z - nominal_tcp_z,
         "minimum_clearance_m": max(0.0, float(minimum_clearance_m)),
         "grasp_tcp_z_m": tcp_z,
     }

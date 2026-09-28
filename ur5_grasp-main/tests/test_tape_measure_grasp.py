@@ -37,10 +37,21 @@ class TapeMeasureGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(tcp_z, 0.0294, places=4)
 
     def test_typical_verified_tape_geometry_keeps_safe_clearance(self):
-        tcp_z, plan = plan_tape_measure_grasp(0.0600, 0.0214)
+        tcp_z, plan = plan_tape_measure_grasp(
+            0.0600, 0.0214, center_bias_m=-0.008)
         self.assertIsNotNone(tcp_z, plan)
         self.assertGreaterEqual(tcp_z - plan["support_plane_z_m"], 0.008)
         self.assertAlmostEqual(plan["body_thickness_m"], 0.0386, places=4)
+        self.assertAlmostEqual(plan["applied_center_bias_m"], -0.008, places=4)
+        self.assertAlmostEqual(tcp_z, 0.0327, places=4)
+
+    def test_downward_bias_cannot_cross_support_clearance(self):
+        tcp_z, plan = plan_tape_measure_grasp(
+            0.0374, 0.0214, center_bias_m=-0.008,
+            minimum_clearance_m=0.008)
+        self.assertIsNotNone(tcp_z, plan)
+        self.assertAlmostEqual(tcp_z, 0.0294, places=4)
+        self.assertAlmostEqual(plan["applied_center_bias_m"], 0.0, places=4)
 
 
 if __name__ == "__main__":
