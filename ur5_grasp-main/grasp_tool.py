@@ -84,6 +84,10 @@ D435I_MIN_SCORE = 0.45
 D435I_TOOL_MIN_SCORES = {"tape measure": 0.40}
 MIN_BOX_SIDE_PX = 12
 MIN_VALID_DEPTH_POINTS = 80
+# D455 sees a screwdriver handle from much farther away than D435i.  The
+# handle extractor already rejects a narrow handle and requires 20 valid
+# core-depth pixels, so use that same minimum only for D455 coarse location.
+D455_TOOL_MIN_DEPTH_POINTS = {"screwdriver": 20}
 MEASUREMENT_LOG_INTERVAL_S = 2.0
 TARGET_ASSOCIATION_MAX_DISTANCE_M = 0.10
 APPROACH_HEIGHT_M = 0.15
@@ -1254,9 +1258,13 @@ def gate_detection(result, tracking_status, camera_name, base_xyz=None,
     x1, y1, x2, y2 = result.get("box", (0, 0, 0, 0))
     if min(x2 - x1, y2 - y1) < MIN_BOX_SIDE_PX:
         reasons.append("box too small")
+    min_depth_points = (D455_TOOL_MIN_DEPTH_POINTS.get(
+        tool_category, MIN_VALID_DEPTH_POINTS)
+        if camera_name == "D455" else MIN_VALID_DEPTH_POINTS)
     depth_points = int(result.get("valid_depth_points", 0))
-    if depth_points < MIN_VALID_DEPTH_POINTS:
-        reasons.append("too few depth points (%d<%d)" % (depth_points, MIN_VALID_DEPTH_POINTS))
+    if depth_points < min_depth_points:
+        reasons.append("too few depth points (%d<%d)" %
+                       (depth_points, min_depth_points))
     if result.get("z_mm") is None:
         reasons.append("invalid depth")
 
