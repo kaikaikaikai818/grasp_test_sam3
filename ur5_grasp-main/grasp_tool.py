@@ -1729,8 +1729,10 @@ def parse_args():
 
 def gripper_test():
     """交互式夹爪自检：输入 position -> 控制并回显当前 POS。"""
-    robot = UR_Robot(robot_ip=ROBOT_IP, is_use_robot=True, is_use_camera=False,
-                     is_use_gripper=True, gripper_port=GRIP_PORT)
+    robot = UR_Robot(robot_ip=ROBOT_IP, is_use_robot=False, connect_robot=False,
+                     is_use_camera=False, is_use_gripper=True,
+                     gripper_port=GRIP_PORT)
+    print("仅连接夹爪串口；未连接机械臂运动控制或相机。")
     print("夹爪自检：输入 position（0~65535）控制，观察爪的开合。")
     print("  数值越小越张开、越大越闭合。q 退出。")
     while True:

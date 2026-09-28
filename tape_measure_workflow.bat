@@ -17,6 +17,7 @@ echo ===== Tape measure dual-camera workflow =====
 echo 1. Visual detection only - robot stays still
 echo 2. Test high observation pose - press P when both cameras pass
 echo 3. Recovery lift - press U to move vertically to 250 mm
+echo 4. Calibrate tape-measure gripper opening - gripper only
 echo Q. Exit
 set "ACTION="
 set /p "ACTION=Select an option: "
@@ -25,7 +26,8 @@ if /i "%ACTION%"=="Q" exit /b 0
 if "%ACTION%"=="1" goto vision
 if "%ACTION%"=="2" goto observe
 if "%ACTION%"=="3" goto recovery_lift
-echo [ERROR] Invalid option. Enter 1, 2, 3, or Q.
+if "%ACTION%"=="4" goto gripper_opening
+echo [ERROR] Invalid option. Enter 1, 2, 3, 4, or Q.
 goto menu
 
 :require_robot_modules
@@ -59,6 +61,18 @@ if errorlevel 1 goto missing_modules
 echo [WARNING] Press U once to keep XY and orientation and lift to 250 mm.
 echo No horizontal motion, descent, or gripper command is allowed.
 "%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "tape measure" --stage observe --check-calib
+pause
+goto menu
+
+:gripper_opening
+call :require_robot_modules
+if errorlevel 1 goto missing_modules
+echo [GRIPPER ONLY] Robot motion control and cameras stay disconnected.
+echo Keep the gripper clear. Smaller position values open it wider.
+echo The verified tape-measure opening position is 4000.
+echo Enter 4000 to open, then enter Q to exit.
+echo Stop when the opening is slightly wider than the tape measure; enter Q to exit.
+"%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --gripper-test
 pause
 goto menu
 
