@@ -301,6 +301,7 @@ def main():
     hi_filter = TemporalResultFilter(stable_frames=STABLE_FRAMES)
     angle_history = deque(maxlen=3)
     angle_rotation_completed = False
+    locked_planar_orientation = None
 
     win_ho = "HO(D455)_eye_out"
     win_hi = "HI(D435I)_eye_in"
@@ -557,6 +558,12 @@ def main():
                 handle_thickness, _ = estimate_handle_thickness(
                     hi_handle.radius_px, hi_handle.depth_m,
                     float(robot.cam_intrinsics[0, 0]))
+            preview_orientation = None
+            if args.enable_angle_rotation:
+                if angle_rotation_completed and locked_planar_orientation is not None:
+                    preview_orientation = locked_planar_orientation
+                elif angle_stable:
+                    preview_orientation = current_orientation
             grasp_preview = build_grasp_preview(
                 state["hi_base"], hi_gate, observation_active,
                 support_plane=current_support_plane,
@@ -565,9 +572,17 @@ def main():
                 profile=profile,
                 tool_category=tool_category,
                 require_adaptive=ENABLE_SCREWDRIVER_GRASP,
-                orientation=(current_orientation if args.enable_angle_rotation
-                             and angle_stable else None))
-            if observation_active and grasp_preview.get("ready"):
+                orientation=preview_orientation)
+            direction_ready = True
+            if args.enable_angle_rotation:
+                direction_ready = bool(
+                    angle_rotation_completed
+                    and locked_planar_orientation is not None
+                    and tcp_pose is not None
+                    and _orientation_error_deg(
+                        tcp_pose[3:6], locked_planar_orientation) <= ANGLE_STABLE_DEG)
+            if (observation_active and grasp_preview.get("ready")
+                    and direction_ready):
                 descent_ready_streak += 1
             else:
                 descent_ready_streak = 0
@@ -581,6 +596,7 @@ def main():
                     if rotate_to_planar_orientation(robot, current_orientation):
                         hi_filter.reset()
                         angle_history.clear()
+                        locked_planar_orientation = list(current_orientation)
                         angle_rotation_completed = True
                         auto_grasp_state = "wait_descent"
                         auto_grasp_deadline = time.time() + ANGLE_GRASP_TIMEOUT_S
@@ -593,9 +609,10 @@ def main():
                 elif (not args.enable_angle_rotation or angle_rotation_completed) and (
                       descent_ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES
                       and grasp_preview.get("ready")):
-                    if args.enable_angle_rotation and (not current_orientation or
+                    if args.enable_angle_rotation and (
+                            locked_planar_orientation is None or
                             _orientation_error_deg(_read_valid_tcp_pose(robot)[3:6],
-                                                   current_orientation) > ANGLE_STABLE_DEG):
+                                                   locked_planar_orientation) > ANGLE_STABLE_DEG):
                         print("[一键抓取] 旋转后方向不一致，禁止下降。")
                         auto_grasp_state = "idle"
                         continue
@@ -754,6 +771,7 @@ def main():
                     print("[D455粗定位] 仅用D455对齐坐标移动到目标上方；腕部相机此时可能还看不到工具。")
                     if move_to_safe_observation(robot, coarse_destination):
                         angle_rotation_completed = False
+                        locked_planar_orientation = None
                         d455_detection_frozen = True
                         observation_active = True
                         ho_filter.reset()
@@ -777,6 +795,7 @@ def main():
                 else:
                     if move_to_safe_observation(robot, approach_destination):
                         angle_rotation_completed = False
+                        locked_planar_orientation = None
                         d455_detection_frozen = True
                         observation_active = True
                         ho_filter.reset()
@@ -791,10 +810,11 @@ def main():
                     print("[安全锁定] 请先完成 a（D455粗定位）或 P（双相机观察点）。")
                 elif args.enable_angle_rotation and not angle_rotation_completed:
                     print("[安全锁定] 请先按 y 在安全高度旋转并等待 D435i 重新稳定。")
-                elif args.enable_angle_rotation and (not angle_stable or not current_orientation or
+                elif args.enable_angle_rotation and (
+                        locked_planar_orientation is None or
                         _orientation_error_deg(_read_valid_tcp_pose(robot)[3:6],
-                                               current_orientation) > ANGLE_STABLE_DEG):
-                    print("[安全锁定] 旋转后方向未重新稳定或与当前姿态不一致。")
+                                               locked_planar_orientation) > ANGLE_STABLE_DEG):
+                    print("[安全锁定] Y键锁定姿态不存在或机械臂实际姿态未到位。")
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] D435i 预览无效：%s" % grasp_preview.get("reason", "unknown"))
                 elif ENABLE_SCREWDRIVER_GRASP and not grasp_preview.get("adaptive"):
@@ -850,6 +870,7 @@ def main():
                 elif rotate_to_planar_orientation(robot, current_orientation):
                     hi_filter.reset()
                     angle_history.clear()
+                    locked_planar_orientation = list(current_orientation)
                     angle_rotation_completed = True
                     if args.stage == "rotate":
                         print("[方向对齐] 已旋转；等待 D435i 重新稳定。本阶段不会下降。")
