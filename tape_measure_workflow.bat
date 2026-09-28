@@ -19,6 +19,7 @@ echo 2. Test high observation pose - press P when both cameras pass
 echo 3. Recovery lift - press U to move vertically to 250 mm
 echo 4. Calibrate tape-measure gripper opening - gripper only
 echo 5. Test tape-measure no-contact descent - press P, then D
+echo 6. Test one low-force tape-measure grasp - press P, D, then R
 echo Q. Exit
 set "ACTION="
 set /p "ACTION=Select an option: "
@@ -29,7 +30,8 @@ if "%ACTION%"=="2" goto observe
 if "%ACTION%"=="3" goto recovery_lift
 if "%ACTION%"=="4" goto gripper_opening
 if "%ACTION%"=="5" goto no_contact_descent
-echo [ERROR] Invalid option. Enter 1, 2, 3, 4, 5, or Q.
+if "%ACTION%"=="6" goto low_force_grasp
+echo [ERROR] Invalid option. Enter 1, 2, 3, 4, 5, 6, or Q.
 goto menu
 
 :require_robot_modules
@@ -88,6 +90,20 @@ echo Press D only when the preview says SAFE DESCENT READY.
 echo The robot stops 40 mm above the calculated tape-body midpoint and will not close the gripper.
 echo Press U to recover vertically to 250 mm, then press Q to exit.
 "%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "tape measure" --stage descent --check-calib
+pause
+goto menu
+
+:low_force_grasp
+call :require_robot_modules
+if errorlevel 1 goto missing_modules
+echo [WARNING] This mode controls both the robot and gripper for one guarded grasp.
+echo Confirm TCP_clamp is active, the tape measure is centered, and the path is clear.
+echo Wait for both cameras to show PASS, press P, then wait for SAFE DESCENT READY.
+echo Press D and visually confirm the 40 mm no-contact stop before pressing R.
+echo R opens to 4000, descends to the measured body midpoint, closes at force 20,
+echo checks contact torque, and lifts only 50 mm. A failed contact check opens and retreats.
+echo After success press O to release, U to recover to 250 mm, then Q to exit.
+"%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "tape measure" --stage grasp --tape-grasp-test --check-calib
 pause
 goto menu
 

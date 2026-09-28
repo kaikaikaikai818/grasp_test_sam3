@@ -161,6 +161,11 @@ GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
 GRIP_OPEN_SPEED = 100
 GRIP_OPEN_FORCE = 40
 GRIP_TORQUE_MIN = 80          # 实时力矩(0x060C)阈值: 低于此且力矩未到达即判空抓
+# 卷尺首次实体抓取只使用已经通过螺丝刀实测的闭合终点，并进一步降低力度。
+# 该模式仍要求 P -> D -> R，且只抬升 50mm；失败会自动张开并退回。
+TAPE_MEASURE_TEST_CLOSE_POS = 11000
+TAPE_MEASURE_TEST_GRIP_FORCE = 20
+TAPE_MEASURE_TEST_TORQUE_MIN = 80
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
@@ -190,8 +195,22 @@ def main():
     args.place_after_grasp = args.stage == "place"
     args.vision_only = args.stage == "vision"
     profile = None
+    if args.tape_grasp_test:
+        if tool_category != "tape measure" or args.stage != "grasp":
+            raise ValueError("--tape-grasp-test requires --prompt 'tape measure' --stage grasp")
+        profile = {
+            "tool_label": "卷尺",
+            "height_mode": "adaptive_tape_body",
+            "grasp_tcp_z_m": None,
+            "open_position": UNIVERSAL_OPEN_POSITION,
+            "close_position": TAPE_MEASURE_TEST_CLOSE_POS,
+            "grip_force": TAPE_MEASURE_TEST_GRIP_FORCE,
+            "torque_min": TAPE_MEASURE_TEST_TORQUE_MIN,
+            "requires_angle": False,
+        }
     profile_required = (
         tool_category != "screwdriver"
+        and profile is None
         and (args.stage in ("grasp", "place")
              or (args.stage in ("rotate", "descent")
                  and tool_category != "tape measure")))
@@ -340,6 +359,12 @@ def main():
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
+    if args.tape_grasp_test:
+        print("  [卷尺低力试抓] 张开=%d，闭合目标=%d，力度=%d；必须先完成 P → D，再按 R。" %
+              (profile["open_position"], profile["close_position"],
+               profile["grip_force"]))
+        print("      R 仅低力闭合、检查力矩并试抬升 %.0fmm；失败会自动张开并退回。" %
+              (SCREWDRIVER_TEST_LIFT_M * 1000.0))
     if ENABLE_SAFE_APPROACH_TEST:
         print("  U -> 保持当前XY和姿态，只垂直回升到至少 %.0fmm 安全高度" %
               (SAFE_TRAVEL_Z_M * 1000.0))
@@ -999,18 +1024,8 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
 
     plan = None
     grasp_tcp_z = None
-    if profile is not None:
-        if support_plane is None:
-            preview["reason"] = "support plane unavailable for tool profile"
-            return preview
-        grasp_tcp_z = float(profile["grasp_tcp_z_m"])
-        if not 0.005 <= grasp_tcp_z - support_plane.z_m <= 0.25:
-            preview["reason"] = "profile grip height inconsistent with current support plane"
-            return preview
-        plan = {"grasp_tcp_z_m": grasp_tcp_z,
-                "support_plane_z_m": support_plane.z_m,
-                "profile_grasp": True}
-    elif tool_category == "tape measure":
+    if tool_category == "tape measure" and (
+            profile is None or profile.get("height_mode") == "adaptive_tape_body"):
         if calibration is None:
             preview["reason"] = "fixed support-plane calibration unavailable"
             return preview
@@ -1031,6 +1046,18 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
             return preview
         plan["live_support_plane_z_m"] = float(support_plane.z_m)
         plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
+        plan["profile_grasp"] = profile is not None
+    elif profile is not None:
+        if support_plane is None:
+            preview["reason"] = "support plane unavailable for tool profile"
+            return preview
+        grasp_tcp_z = float(profile["grasp_tcp_z_m"])
+        if not 0.005 <= grasp_tcp_z - support_plane.z_m <= 0.25:
+            preview["reason"] = "profile grip height inconsistent with current support plane"
+            return preview
+        plan = {"grasp_tcp_z_m": grasp_tcp_z,
+                "support_plane_z_m": support_plane.z_m,
+                "profile_grasp": True}
     elif (calibration is not None and support_plane is not None
             and handle_thickness_m is not None):
         fixed_plane_z, plane_reason = verified_support_plane_z(
@@ -1579,8 +1606,8 @@ def move_to_safe_descent_test(robot, preview):
         return False
 
 
-def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
-                              calibration, orientation=None, grip_profile=None):
+def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
+                          calibration, orientation=None, grip_profile=None):
     """Perform the guarded final stage after a verified no-contact descent.
 
     ``grasp_tcp_z`` is planned from the live handle thickness and the one-time
@@ -1598,6 +1625,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
                   else grip_profile["grip_force"])
     torque_min = (GRIP_TORQUE_MIN if grip_profile is None
                   else grip_profile["torque_min"])
+    tool_label = "螺丝刀" if grip_profile is None else grip_profile.get("tool_label", "工具")
     final = target.copy()
     final[2] = float(grasp_tcp_z)
     plane_clearance = final[2] - float(support_plane_z_m)
@@ -1609,7 +1637,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
     retreat = final.copy()
     retreat[2] += SAFE_DESCENT_CLEARANCE_M
     if not (point_in_workspace(final) and point_in_workspace(retreat)):
-        print("[安全中止] 螺丝刀夹持路径超出工作空间。")
+        print("[安全中止] %s夹持路径超出工作空间。" % tool_label)
         return False
     try:
         current = _read_valid_tcp_pose(robot)
@@ -1618,7 +1646,7 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
             print("[安全中止] 当前TCP未停在D无接触终点（偏差 %.1fmm），拒绝执行R。" %
                   (start_error_m * 1000.0))
             return False
-        if not verify_tool_orientation(robot, "螺丝刀夹持前", orientation):
+        if not verify_tool_orientation(robot, "%s夹持前" % tool_label, orientation):
             return False
         high_align = current.copy()
         high_align[:2] = target[:2]
@@ -1626,11 +1654,11 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
         high_align[3:6] = orientation
         if robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE) == -1:
             raise RuntimeError("gripper did not open")
-        print("[螺丝刀抓取] 在安全高度对准手柄中段。")
+        print("[%s抓取] 在安全高度对准抓取区域。" % tool_label)
         robot.moveL(high_align.tolist(), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        print("[螺丝刀抓取] 低速下降到夹持高度=%s" %
-              ["%.4f" % value for value in final])
+        print("[%s抓取] 低速下降到夹持高度=%s" %
+              (tool_label, ["%.4f" % value for value in final]))
         robot.moveL(final.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
         if not verify_tool_orientation(robot, "闭爪前", orientation):
@@ -1655,11 +1683,12 @@ def execute_screwdriver_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_
             return False
         robot.moveL(lift.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
                     acceleration=SCREWDRIVER_GRASP_SPEED)
-        print("[螺丝刀抓取完成] reached=%s torque=%s；已低力夹持并抬升 %.0fmm，停在抬升位置。"
-              % (torque_reached, torque_current, SCREWDRIVER_TEST_LIFT_M * 1000.0))
+        print("[%s抓取完成] reached=%s torque=%s；已低力夹持并抬升 %.0fmm，停在抬升位置。"
+              % (tool_label, torque_reached, torque_current,
+                 SCREWDRIVER_TEST_LIFT_M * 1000.0))
         return True
     except Exception as exc:
-        print("[安全中止] 螺丝刀抓取异常：%s" % exc)
+        print("[安全中止] %s抓取异常：%s" % (tool_label, exc))
         try:
             if robot.rtde_c is not None and hasattr(robot.rtde_c, "stopL"):
                 robot.rtde_c.stopL(1.0)
@@ -1709,7 +1738,7 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
     """
     if not (hi_gate["passed"] and (hi_handle is not None or grip_profile is not None)
             and current_target is not None):
-        return "waiting", "等待稳定手柄区域和当前目标。"
+        return "waiting", "等待稳定抓取区域和当前目标。"
     if locked_handle is None or "grasp_tcp_z_m" not in locked_handle:
         return "failed", "未记录自适应夹持高度；请重新运行下降。"
     locked_plane_z = locked_handle.get("support_plane_z_m")
@@ -1733,8 +1762,8 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
     target_shift = float(np.linalg.norm(
         np.asarray(current_target, dtype=np.float64) - locked_target))
     if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
-        return "failed", "手柄目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
-    ok = execute_screwdriver_grasp(
+        return "failed", "目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
+    ok = execute_guarded_grasp(
         robot, locked_target, float(locked_handle["grasp_tcp_z_m"]),
         float(locked_plane_z), calibration,
         orientation=locked_handle.get("orientation", TOOL_ORIENTATION),
@@ -1763,6 +1792,8 @@ def parse_args():
                    help="approved fixed-placement coordinates for this cell")
     p.add_argument("--gripper-test", action="store_true",
                    help="仅测试夹爪：交互式发送 position 并回显，用于定开/合值")
+    p.add_argument("--tape-grasp-test", action="store_true",
+                   help="卷尺首次低力试抓：使用动态壳体中线高度和受限夹爪参数")
     p.add_argument("--check-calib", action="store_true",
                    help="启动时读实时内参并比对标定内参，超阈值则拒绝执行")
     return p.parse_args()
