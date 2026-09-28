@@ -1,8 +1,12 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import grasp_tool
 from grasp_tool import (POST_GRASP_LIFT_SPEED, SAFE_APPROACH_SPEED,
                         SAFE_DESCENT_SPEED, SAFE_DESCENT_TRANSIT_SPEED,
                         SCREWDRIVER_GRASP_SPEED, grasp_preview_status_text,
@@ -35,6 +39,36 @@ class LockedGraspTests(unittest.TestCase):
         self.assertGreater(SAFE_DESCENT_TRANSIT_SPEED, SAFE_DESCENT_SPEED)
         self.assertGreater(SAFE_DESCENT_SPEED, SCREWDRIVER_GRASP_SPEED)
         self.assertLessEqual(POST_GRASP_LIFT_SPEED, SAFE_DESCENT_TRANSIT_SPEED)
+
+    def test_descent_has_no_physical_100mm_pregrasp_stop(self):
+        class FakeRobot:
+            def __init__(self):
+                self.pose = np.array([0.0, -0.6, 0.25, *grasp_tool.TOOL_ORIENTATION])
+                self.moves = []
+                self.rtde_c = None
+
+            def get_actual_tcp_pose(self):
+                return self.pose.tolist()
+
+            def moveL(self, pose, speed, acceleration):
+                self.pose = np.asarray(pose, dtype=np.float64)
+                self.moves.append((self.pose.copy(), speed, acceleration))
+
+        robot = FakeRobot()
+        preview = {
+            "ready": True,
+            "target_surface_xyz_m": [0.01, -0.61, 0.05],
+            "endpoint_xyz_m": [0.01, -0.61, 0.034],
+            "pregrasp_xyz_m": [0.01, -0.61, 0.134],
+            "orientation": list(grasp_tool.TOOL_ORIENTATION),
+        }
+        with patch.object(grasp_tool, "verify_tool_orientation", return_value=True):
+            self.assertTrue(grasp_tool.move_to_safe_descent_test(robot, preview))
+
+        self.assertEqual(len(robot.moves), 2)
+        moved_z = [round(float(move[0][2]), 3) for move in robot.moves]
+        self.assertNotIn(0.134, moved_z)
+        self.assertAlmostEqual(moved_z[-1], 0.074, places=3)
 
 
 if __name__ == "__main__":

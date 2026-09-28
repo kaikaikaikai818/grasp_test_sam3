@@ -1659,13 +1659,12 @@ def retreat_vertical_to_safe_height(robot):
 
 
 def move_to_safe_descent_test(robot, preview):
-    """Perform one slow no-contact descent; never touch the tool or use the gripper."""
+    """Descend directly from the verified high pose to the 40 mm checkpoint."""
     if not preview.get("ready"):
         print("[安全中止] 无有效D435i预览，拒绝无接触下降。")
         return False
     target = np.asarray(preview["target_surface_xyz_m"], dtype=np.float64)
     grasp_point = np.asarray(preview["endpoint_xyz_m"], dtype=np.float64)
-    pregrasp = np.asarray(preview["pregrasp_xyz_m"], dtype=np.float64)
     stop_point = grasp_point.copy()
     stop_point[2] += SAFE_DESCENT_CLEARANCE_M
     orientation = preview.get("orientation", TOOL_ORIENTATION)
@@ -1685,11 +1684,11 @@ def move_to_safe_descent_test(robot, preview):
             plan["body_thickness_m"] * 1000.0, plan["body_mid_z_m"],
             plan["applied_center_bias_m"] * 1000.0,
             plan["grasp_tcp_z_m"]))
-    if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
+    if not point_in_workspace(stop_point):
         print("[安全中止] 无接触下降路径超出工作空间。")
         return False
-    if stop_point[2] >= pregrasp[2]:
-        print("[安全中止] 无接触终点不低于预抓取点，拒绝执行。")
+    if stop_point[2] <= grasp_point[2]:
+        print("[安全中止] 40mm检查点无有效净空，拒绝执行。")
         return False
 
     try:
@@ -1710,16 +1709,8 @@ def move_to_safe_descent_test(robot, preview):
         robot.moveL(high_align.tolist(), speed=SAFE_DESCENT_TRANSIT_SPEED,
                     acceleration=SAFE_DESCENT_TRANSIT_ACCELERATION)
 
-        pregrasp_pose = pregrasp.tolist() + list(orientation)
-        print("[无接触下降] 下降到预抓取高度=%s" %
-              ["%.4f" % value for value in pregrasp_pose])
-        robot.moveL(pregrasp_pose, speed=SAFE_DESCENT_TRANSIT_SPEED,
-                    acceleration=SAFE_DESCENT_TRANSIT_ACCELERATION)
-        if not verify_tool_orientation(robot, "预抓取高度", orientation):
-            return False
-
         stop_pose = stop_point.tolist() + list(orientation)
-        print("[无接触下降] 低速停在夹持点上方 %.0fmm=%s" % (
+        print("[无接触下降] 从安全高度直接停在夹持点上方 %.0fmm=%s" % (
             SAFE_DESCENT_CLEARANCE_M * 1000.0,
             ["%.4f" % value for value in stop_pose]))
         robot.moveL(stop_pose, speed=SAFE_DESCENT_SPEED,
