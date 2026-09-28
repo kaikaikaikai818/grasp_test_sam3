@@ -18,6 +18,7 @@ echo 1. Visual detection only - robot stays still
 echo 2. Test high observation pose - press P when both cameras pass
 echo 3. Recovery lift - press U to move vertically to 250 mm
 echo 4. Calibrate tape-measure gripper opening - gripper only
+echo 5. Test tape-measure no-contact descent - press P, then D
 echo Q. Exit
 set "ACTION="
 set /p "ACTION=Select an option: "
@@ -27,7 +28,8 @@ if "%ACTION%"=="1" goto vision
 if "%ACTION%"=="2" goto observe
 if "%ACTION%"=="3" goto recovery_lift
 if "%ACTION%"=="4" goto gripper_opening
-echo [ERROR] Invalid option. Enter 1, 2, 3, 4, or Q.
+if "%ACTION%"=="5" goto no_contact_descent
+echo [ERROR] Invalid option. Enter 1, 2, 3, 4, 5, or Q.
 goto menu
 
 :require_robot_modules
@@ -73,6 +75,19 @@ echo The verified tape-measure opening position is 4000.
 echo Enter 4000 to open, then enter Q to exit.
 echo Stop when the opening is slightly wider than the tape measure; enter Q to exit.
 "%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --gripper-test
+pause
+goto menu
+
+:no_contact_descent
+call :require_robot_modules
+if errorlevel 1 goto missing_modules
+echo [WARNING] This mode connects robot control but does not initialize the gripper.
+echo Keep the path clear and confirm the active TCP is TCP_clamp.
+echo Wait for both cameras to show PASS, press P, then wait for D435i STABLE.
+echo Press D only when the preview says SAFE DESCENT READY.
+echo The robot stops 40 mm above the calculated tape-body midpoint and will not close the gripper.
+echo Press U to recover vertically to 250 mm, then press Q to exit.
+"%PROJECT_PYTHON%" "%~dp0ur5_grasp-main\grasp_tool.py" --prompt "tape measure" --stage descent --check-calib
 pause
 goto menu
 

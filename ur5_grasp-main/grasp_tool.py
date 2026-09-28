@@ -46,6 +46,7 @@ from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
 from bsp.camera_bsp.tool_profiles import UNIVERSAL_OPEN_POSITION, load_tool_profile
+from bsp.camera_bsp.tape_measure_grasp import plan_tape_measure_grasp
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
                                                 principal_axis_base)
@@ -122,7 +123,7 @@ DEPTH_SCALE_FILE = str(SCRIPT_ROOT / "camera_depth_scale.txt")
 CAM_INI = str(SCRIPT_ROOT / "camera_20260906.ini")
 CAM2END_PATH = str(SCRIPT_ROOT / "cam2end_20260906.txt")
 CAMERA_ALIGNMENT_PATH = SCRIPT_ROOT / "camera_alignment.json"
-SCREWDRIVER_CALIBRATION_PATH = SCRIPT_ROOT / "grasp_surface_calibration.json"
+GRASP_SURFACE_CALIBRATION_PATH = SCRIPT_ROOT / "grasp_surface_calibration.json"
 # The active controller TCP named TCP_clamp is already calibrated at the jaw
 # centre.  Therefore the jaw centre and commanded TCP share the same Z height.
 TCP_CLAMP_GRIP_CENTER_OFFSET_M = 0.0
@@ -179,11 +180,22 @@ def main():
     ENABLE_SAFE_DESCENT_TEST = args.stage in ("descent", "grasp", "place")
     ENABLE_SCREWDRIVER_GRASP = args.stage in ("grasp", "place")
     ENABLE_ONE_KEY_GRASP = bool(args.auto and args.stage in ("grasp", "place"))
-    args.enable_angle_rotation = args.stage in ("rotate", "descent", "grasp", "place")
+    # A tape measure is grasped around its compact body and does not need a
+    # planar-axis rotation for the first guarded descent.  Elongated tools keep
+    # the existing direction-alignment gate.
+    angle_capable = tool_category in (
+        "screwdriver", "adjustable wrench", "rubber mallet", "tape dispenser")
+    args.enable_angle_rotation = (
+        args.stage in ("rotate", "descent", "grasp", "place") and angle_capable)
     args.place_after_grasp = args.stage == "place"
     args.vision_only = args.stage == "vision"
     profile = None
-    if tool_category != "screwdriver" and args.stage in ("rotate", "descent", "grasp", "place"):
+    profile_required = (
+        tool_category != "screwdriver"
+        and (args.stage in ("grasp", "place")
+             or (args.stage in ("rotate", "descent")
+                 and tool_category != "tape measure")))
+    if profile_required:
         profile = load_tool_profile(args.profile_config, tool_category, WORKSPACE_LIMITS)
     if args.enable_angle_rotation and tool_category != "screwdriver" and profile is None:
         raise ValueError("non-screwdriver rotation requires an approved grasp profile")
@@ -299,22 +311,22 @@ def main():
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
     print("  当前目标: %s（双视场文字识别）。" % TEXT_PROMPT)
-    screwdriver_calibration_error = None
+    surface_calibration_error = None
     try:
-        screwdriver_calibration = load_calibration(
-            SCREWDRIVER_CALIBRATION_PATH,
+        surface_calibration = load_calibration(
+            GRASP_SURFACE_CALIBRATION_PATH,
             default_gripper_offset_m=TCP_CLAMP_GRIP_CENTER_OFFSET_M)
     except Exception as exc:
-        screwdriver_calibration = None
-        screwdriver_calibration_error = str(exc)
-    if TEXT_PROMPT.strip().lower() == "a screwdriver":
-        if screwdriver_calibration is None:
-            print("  [螺丝刀抓取锁定] 尚未保存固定支撑面：运行 calibrate_screwdriver_grasp.py plane。")
-            if screwdriver_calibration_error:
-                print("      标定文件读取失败：%s" % screwdriver_calibration_error)
+        surface_calibration = None
+        surface_calibration_error = str(exc)
+    if tool_category in ("screwdriver", "tape measure"):
+        if surface_calibration is None:
+            print("  [抓取高度锁定] 尚未保存固定支撑面：运行 calibrate_screwdriver_grasp.py plane。")
+            if surface_calibration_error:
+                print("      标定文件读取失败：%s" % surface_calibration_error)
         else:
-            print("  [螺丝刀标定] 已加载：固定支撑面 z=%.4fm，夹持中心使用活动TCP_clamp。" %
-                  screwdriver_calibration["support_plane_z_m"])
+            print("  [固定支撑面] 已加载：z=%.4fm，夹持中心使用活动TCP_clamp；所有工具共用。" %
+                  surface_calibration["support_plane_z_m"])
     if ENABLE_SAFE_APPROACH_TEST:
         print("  P -> 仅到安全观察点：先升至 %.0fmm，再摆正并水平移动到目标上方；不会下降或控制夹爪"
               % (SAFE_TRAVEL_Z_M * 1000.0))
@@ -505,9 +517,10 @@ def main():
             grasp_preview = build_grasp_preview(
                 state["hi_base"], hi_gate, observation_active,
                 support_plane=current_support_plane,
-                calibration=screwdriver_calibration,
+                calibration=surface_calibration,
                 handle_thickness_m=handle_thickness,
                 profile=profile,
+                tool_category=tool_category,
                 require_adaptive=ENABLE_SCREWDRIVER_GRASP,
                 orientation=(current_orientation if args.enable_angle_rotation
                              and angle_stable else None))
@@ -545,7 +558,7 @@ def main():
                         continue
                     locked = attempt_descent(
                         robot, grasp_preview, current_support_plane,
-                        calibration=screwdriver_calibration)
+                        calibration=surface_calibration)
                     if locked is None:
                         print("[一键抓取] 下降未通过安全门，停在观察点。")
                         auto_grasp_state = "idle"
@@ -563,7 +576,7 @@ def main():
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
-                        current_support_plane, screwdriver_calibration, state["hi_base"],
+                        current_support_plane, surface_calibration, state["hi_base"],
                         grip_profile=profile)
                     if status == "done":
                         grasp_completed = True
@@ -749,7 +762,7 @@ def main():
                 else:
                     locked = attempt_descent(
                         robot, grasp_preview, current_support_plane,
-                        calibration=screwdriver_calibration)
+                        calibration=surface_calibration)
                     if locked is not None:
                         locked_grasp_preview = dict(grasp_preview)
                         locked_screwdriver_handle = locked
@@ -758,7 +771,7 @@ def main():
             elif key == ord('r'):
                 if not ENABLE_SCREWDRIVER_GRASP:
                     print("[安全锁定] 此工具尚未启用经过审核的抓取配置。")
-                elif tool_category == "screwdriver" and screwdriver_calibration is None:
+                elif tool_category == "screwdriver" and surface_calibration is None:
                     print("[安全锁定] 未找到有效 grasp_surface_calibration.json。")
                 elif not safe_descent_completed or locked_screwdriver_handle is None:
                     print("[安全锁定] 请先完成 P 和 D 无接触下降测试。")
@@ -769,7 +782,7 @@ def main():
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
-                        current_support_plane, screwdriver_calibration, state["hi_base"],
+                        current_support_plane, surface_calibration, state["hi_base"],
                         grip_profile=profile)
                     if message:
                         print("[安全锁定] " + message)
@@ -954,7 +967,7 @@ def coarse_approach_candidate(ho_base_aligned, ho_gate, alignment_applied,
 def build_grasp_preview(hi_base, hi_gate, observation_active,
                         support_plane=None, calibration=None,
                         handle_thickness_m=None, orientation=None, profile=None,
-                        require_adaptive=False):
+                        tool_category=None, require_adaptive=False):
     """Plan the descent to the handle mid using the adaptive grasp model.
 
     The handle thickness is estimated from its projected width every attempt, and
@@ -997,6 +1010,27 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
         plan = {"grasp_tcp_z_m": grasp_tcp_z,
                 "support_plane_z_m": support_plane.z_m,
                 "profile_grasp": True}
+    elif tool_category == "tape measure":
+        if calibration is None:
+            preview["reason"] = "fixed support-plane calibration unavailable"
+            return preview
+        if support_plane is None:
+            preview["reason"] = "live support plane unavailable"
+            return preview
+        fixed_plane_z, plane_reason = verified_support_plane_z(
+            support_plane, calibration, SUPPORT_PLANE_SHIFT_MAX_M)
+        if fixed_plane_z is None:
+            preview["reason"] = plane_reason
+            return preview
+        grasp_tcp_z, plan = plan_tape_measure_grasp(
+            float(target[2]), float(fixed_plane_z),
+            float(calibration["gripper_offset_m"]),
+            minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M)
+        if grasp_tcp_z is None:
+            preview["reason"] = plan
+            return preview
+        plan["live_support_plane_z_m"] = float(support_plane.z_m)
+        plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
     elif (calibration is not None and support_plane is not None
             and handle_thickness_m is not None):
         fixed_plane_z, plane_reason = verified_support_plane_z(
@@ -1483,6 +1517,13 @@ def move_to_safe_descent_test(robot, preview):
             plan["handle_thickness_m"] * 1000.0, plan["handle_mid_z_m"],
             plan["gripper_offset_m"] * 1000.0,
             plan.get("applied_center_bias_m", 0.0) * 1000.0,
+            plan["grasp_tcp_z_m"]))
+    elif preview.get("plan") and "body_thickness_m" in preview["plan"]:
+        plan = preview["plan"]
+        print("[卷尺抓取几何] 顶面z=%.4f 固定支撑面=%.4f 厚度=%.1fmm "
+              "中线z=%.4f 夹持TCP z=%.4f" % (
+            plan["body_top_z_m"], plan["support_plane_z_m"],
+            plan["body_thickness_m"] * 1000.0, plan["body_mid_z_m"],
             plan["grasp_tcp_z_m"]))
     if not (point_in_workspace(pregrasp) and point_in_workspace(stop_point)):
         print("[安全中止] 无接触下降路径超出工作空间。")
