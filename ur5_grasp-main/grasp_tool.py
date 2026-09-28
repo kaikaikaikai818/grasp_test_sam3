@@ -897,7 +897,14 @@ def main():
                     print("[安全锁定] D435i检测门槛未通过：%s。" %
                           ", ".join(hi_gate["reasons"]))
                 elif not (angle_stable and current_orientation):
-                    print("[安全锁定] 卷尺壳体方向尚未连续稳定。")
+                    direction_label = {
+                        "screwdriver": "螺丝刀",
+                        "tape measure": "卷尺壳体",
+                        "adjustable wrench": "活动扳手",
+                        "tape dispenser": "胶带切割器",
+                        "rubber mallet": "锤子",
+                    }.get(tool_category, "工具")
+                    print("[安全锁定] %s方向尚未连续稳定。" % direction_label)
                 elif not grasp_preview.get("ready"):
                     print("[安全锁定] 抓取预览未就绪：%s。" %
                           grasp_preview.get("reason", "unknown"))
