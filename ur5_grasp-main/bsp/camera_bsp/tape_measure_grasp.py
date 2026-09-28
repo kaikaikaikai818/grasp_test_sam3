@@ -2,6 +2,35 @@
 from __future__ import annotations
 
 import numpy as np
+import cv2
+
+
+def isolate_tape_measure_body(mask):
+    """Return the thick case core while discarding thin tape and wrist straps.
+
+    The distance-transform maximum is inside the case.  Keeping its connected
+    thick-core component removes attached narrow structures before estimating
+    the case orientation.
+    """
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2 or binary.sum() < 100:
+        return None, "invalid or too small tape-measure mask"
+    distances = cv2.distanceTransform(binary.astype(np.uint8), cv2.DIST_L2, 5)
+    _, radius, _, (u, v) = cv2.minMaxLoc(distances)
+    if radius < 5.0:
+        return None, "tape-measure case has insufficient thick body area"
+    core_threshold = max(4.0, float(radius) * 0.30)
+    core = (distances >= core_threshold).astype(np.uint8)
+    count, labels = cv2.connectedComponents(core, connectivity=8)
+    if count <= 1:
+        return None, "tape-measure body core is unavailable"
+    label = int(labels[int(v), int(u)])
+    if label <= 0:
+        return None, "tape-measure body core does not contain its interior center"
+    body = labels == label
+    if int(body.sum()) < 100:
+        return None, "tape-measure body core is too small"
+    return body, None
 
 
 def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,

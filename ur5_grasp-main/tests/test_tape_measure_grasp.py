@@ -3,7 +3,11 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bsp.camera_bsp.tape_measure_grasp import plan_tape_measure_grasp
+import numpy as np
+
+from bsp.camera_bsp.planar_orientation import axial_difference_deg, principal_axis_base
+from bsp.camera_bsp.tape_measure_grasp import (isolate_tape_measure_body,
+                                                plan_tape_measure_grasp)
 
 
 class TapeMeasureGeometryTests(unittest.TestCase):
@@ -52,6 +56,23 @@ class TapeMeasureGeometryTests(unittest.TestCase):
         self.assertIsNotNone(tcp_z, plan)
         self.assertAlmostEqual(tcp_z, 0.0294, places=4)
         self.assertAlmostEqual(plan["applied_center_bias_m"], 0.0, places=4)
+
+    def test_body_orientation_excludes_thin_tape_and_strap(self):
+        mask = np.zeros((160, 220), dtype=bool)
+        mask[45:115, 45:155] = True
+        mask[76:84, 155:215] = True   # extended measuring tape
+        mask[115:155, 96:104] = True  # wrist strap
+        body, reason = isolate_tape_measure_body(mask)
+        self.assertIsNone(reason)
+        self.assertFalse(body[80, 190])
+        self.assertFalse(body[140, 100])
+        depth = np.full(mask.shape, 0.5)
+        angle, reason = principal_axis_base(
+            body, depth,
+            lambda u, v, z: np.array([u * 0.001, v * 0.001, z]),
+            minimum_eigenvalue_ratio=1.25)
+        self.assertIsNone(reason)
+        self.assertLess(axial_difference_deg(angle, 0.0), 2.0)
 
 
 if __name__ == "__main__":

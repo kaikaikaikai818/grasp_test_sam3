@@ -5,7 +5,8 @@ import cv2
 import numpy as np
 
 
-def principal_axis_base(mask, depth_m, pixel_to_base, stride=4):
+def principal_axis_base(mask, depth_m, pixel_to_base, stride=4,
+                        minimum_eigenvalue_ratio=2.0):
     """Return undirected tool-axis angle in base XY, or a rejection reason.
 
     Pixel samples use the measured depth at each point. This handles a wrist
@@ -31,7 +32,8 @@ def principal_axis_base(mask, depth_m, pixel_to_base, stride=4):
         return None, "too few 3-D mask samples for orientation"
     coords = np.asarray(points)
     eigenvalues, eigenvectors = np.linalg.eigh(np.cov(coords, rowvar=False))
-    if eigenvalues[0] <= 0 or eigenvalues[1] / eigenvalues[0] < 2.0:
+    if (eigenvalues[0] <= 0
+            or eigenvalues[1] / eigenvalues[0] < float(minimum_eigenvalue_ratio)):
         return None, "tool has no reliable planar long axis"
     axis = eigenvectors[:, 1]
     return float(np.arctan2(axis[1], axis[0]) % np.pi), None

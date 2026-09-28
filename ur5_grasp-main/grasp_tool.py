@@ -46,7 +46,8 @@ from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
 from bsp.camera_bsp.tool_profiles import UNIVERSAL_OPEN_POSITION, load_tool_profile
-from bsp.camera_bsp.tape_measure_grasp import plan_tape_measure_grasp
+from bsp.camera_bsp.tape_measure_grasp import (isolate_tape_measure_body,
+                                                plan_tape_measure_grasp)
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
                                                 principal_axis_base)
@@ -188,11 +189,9 @@ def main():
     ENABLE_SAFE_DESCENT_TEST = args.stage in ("descent", "grasp", "place")
     ENABLE_SCREWDRIVER_GRASP = args.stage in ("grasp", "place")
     ENABLE_ONE_KEY_GRASP = bool(args.auto and args.stage in ("grasp", "place"))
-    # A tape measure is grasped around its compact body and does not need a
-    # planar-axis rotation for the first guarded descent.  Elongated tools keep
-    # the existing direction-alignment gate.
     angle_capable = tool_category in (
-        "screwdriver", "adjustable wrench", "rubber mallet", "tape dispenser")
+        "screwdriver", "adjustable wrench", "tape measure", "rubber mallet",
+        "tape dispenser")
     args.enable_angle_rotation = (
         args.stage in ("rotate", "descent", "grasp", "place") and angle_capable)
     args.place_after_grasp = args.stage == "place"
@@ -209,7 +208,7 @@ def main():
             "close_position": TAPE_MEASURE_TEST_CLOSE_POS,
             "grip_force": TAPE_MEASURE_TEST_GRIP_FORCE,
             "torque_min": TAPE_MEASURE_TEST_TORQUE_MIN,
-            "requires_angle": False,
+            "requires_angle": True,
         }
     profile_required = (
         tool_category != "screwdriver"
@@ -219,7 +218,8 @@ def main():
                  and tool_category != "tape measure")))
     if profile_required:
         profile = load_tool_profile(args.profile_config, tool_category, WORKSPACE_LIMITS)
-    if args.enable_angle_rotation and tool_category != "screwdriver" and profile is None:
+    if (args.enable_angle_rotation and tool_category not in ("screwdriver", "tape measure")
+            and profile is None):
         raise ValueError("non-screwdriver rotation requires an approved grasp profile")
     if profile and profile["requires_angle"] and not args.enable_angle_rotation:
         raise ValueError("this tool profile requires --stage rotate or a later stage")
@@ -359,6 +359,9 @@ def main():
         if ENABLE_ONE_KEY_GRASP:
             print("       随后自动完成无接触下降与夹持（一键抓取，超时 %.0f 秒即停在安全位置）。"
                   % AUTO_GRASP_TIMEOUT_S)
+    if args.enable_angle_rotation:
+        print("  Y -> 等画面显示 BASE AXIS ... STABLE 后，在 %.0fmm 安全高度按工具方向旋转；"
+              "旋转后必须等待 D435i 重新稳定。" % (SAFE_TRAVEL_Z_M * 1000.0))
     if ENABLE_SAFE_DESCENT_TEST:
         print("  D -> 无接触下降测试：仅在观察点、D435i连续 %d 帧稳定后，低速停在目标上方 %.0fmm；不控制夹爪"
               % (SAFE_DESCENT_CONFIRM_FRAMES, SAFE_DESCENT_CLEARANCE_M * 1000.0))
@@ -493,10 +496,22 @@ def main():
                                     point_camera_mm, tcp_pose=tcp_pose))
                             if (args.enable_angle_rotation or args.show_angle) and tool_category in (
                                     "screwdriver", "adjustable wrench", "rubber mallet",
-                                    "tape dispenser"):
-                                current_axis, angle_reason = principal_axis_base(
-                                    res_hi["mask"], hi_depth * robot.camera.scale,
-                                    hi_pixel_to_base)
+                                    "tape dispenser", "tape measure"):
+                                orientation_mask = res_hi["mask"]
+                                minimum_axis_ratio = 2.0
+                                if tool_category == "tape measure":
+                                    orientation_mask, angle_reason = isolate_tape_measure_body(
+                                        orientation_mask)
+                                    minimum_axis_ratio = 1.25
+                                else:
+                                    angle_reason = None
+                                if orientation_mask is None:
+                                    angle_history.clear()
+                                else:
+                                    current_axis, angle_reason = principal_axis_base(
+                                        orientation_mask, hi_depth * robot.camera.scale,
+                                        hi_pixel_to_base,
+                                        minimum_eigenvalue_ratio=minimum_axis_ratio)
                                 if current_axis is not None:
                                     angle_history.append(current_axis)
                                     current_orientation = overhead_orientation(
@@ -806,7 +821,7 @@ def main():
                 elif "grasp_tcp_z_m" not in locked_screwdriver_handle:
                     print("[安全锁定] D 未记录自适应夹持高度；请重新运行 P → D。")
                 elif not (hi_gate["passed"] and (hi_handle is not None or profile is not None)):
-                    print("[安全锁定] 等待稳定手柄区域。")
+                    print("[安全锁定] 等待稳定抓取区域。")
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
