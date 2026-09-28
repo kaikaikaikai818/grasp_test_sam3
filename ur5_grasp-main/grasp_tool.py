@@ -78,10 +78,13 @@ STABLE_FRAMES = 3               # 连续至少3次有效结果才可能标记为
 # 视觉验收门槛。这里只决定坐标是否值得记录，不会授权机械臂运动。
 D455_MIN_SCORE = 0.35
 D435I_MIN_SCORE = 0.45
-# The tape case remains geometrically strong at the wrist camera even when its
-# CLIPSeg confidence dips after a view/angle change.  Keep D455 coarse
-# confirmation at the shared threshold and relax only the D435i tape gate.
-D435I_TOOL_MIN_SCORES = {"tape measure": 0.40}
+# Close wrist views can reduce CLIPSeg confidence for both the tape case and a
+# small screwdriver even when their geometry is strong.  D455 keeps its shared
+# threshold; only these D435i refinement gates use the lower category floor.
+D435I_TOOL_MIN_SCORES = {
+    "screwdriver": 0.40,
+    "tape measure": 0.40,
+}
 MIN_BOX_SIDE_PX = 12
 MIN_VALID_DEPTH_POINTS = 80
 # D455 sees a screwdriver handle from much farther away than D435i.  The

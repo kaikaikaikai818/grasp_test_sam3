@@ -22,10 +22,16 @@ class DetectionGateTests(unittest.TestCase):
             tool_category="tape measure")
         self.assertTrue(gate["passed"], gate)
 
-    def test_other_tools_keep_shared_wrist_score_floor(self):
+    def test_small_screwdriver_uses_wrist_specific_score_floor(self):
         gate = gate_detection(
             valid_result(0.42), "STABLE", "D435I",
             tool_category="screwdriver")
+        self.assertTrue(gate["passed"], gate)
+
+    def test_other_tools_keep_shared_wrist_score_floor(self):
+        gate = gate_detection(
+            valid_result(0.42), "STABLE", "D435I",
+            tool_category="adjustable wrench")
         self.assertFalse(gate["passed"])
         self.assertIn("score < 0.45", gate["reasons"])
 
