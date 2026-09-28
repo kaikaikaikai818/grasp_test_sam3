@@ -28,6 +28,26 @@ class CandidateTests(unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertIn("direction", reason)
 
+    def test_tape_measure_uses_deepest_interior_body_region(self):
+        mask = np.zeros((120, 160), dtype=bool)
+        mask[25:95, 35:125] = True
+        mask[55:65, 125:150] = True  # protruding tape outlet
+        candidate, reason = propose_grasp_region(
+            mask, np.full(mask.shape, 600, np.uint16), .001,
+            "tape measure")
+        self.assertIsNone(reason)
+        self.assertLess(candidate.center_px[0], 125)
+        self.assertGreater(candidate.region_radius_px, 20)
+
+    def test_tape_measure_rejects_thin_or_fragmented_body(self):
+        mask = np.zeros((80, 120), dtype=bool)
+        mask[38:42, 10:110] = True
+        candidate, reason = propose_grasp_region(
+            mask, np.full(mask.shape, 600, np.uint16), .001,
+            "tape measure")
+        self.assertIsNone(candidate)
+        self.assertIn("body area", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
