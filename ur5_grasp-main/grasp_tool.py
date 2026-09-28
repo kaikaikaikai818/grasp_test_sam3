@@ -681,7 +681,6 @@ def main():
                     elif status == "failed":
                         print("[一键抓取] " + (message or "夹持失败"))
                         auto_grasp_state = "idle"
-                    # status == "waiting"：条件未满足，继续等待（直到超时）
 
             if observation_active:
                 association_text = grasp_preview_status_text(
@@ -864,8 +863,6 @@ def main():
                     print("[安全锁定] 请先完成 P 和 D 无接触下降测试。")
                 elif "grasp_tcp_z_m" not in locked_screwdriver_handle:
                     print("[安全锁定] D 未记录自适应夹持高度；请重新运行 P → D。")
-                elif not (hi_gate["passed"] and (hi_handle is not None or profile is not None)):
-                    print("[安全锁定] 等待稳定抓取区域。")
                 else:
                     status, message = attempt_grasp(
                         robot, locked_screwdriver_handle, hi_gate, hi_handle,
@@ -1190,12 +1187,12 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
 
 def grasp_preview_status_text(preview, safe_descent_enabled=False, ready_streak=0,
                               safe_descent_completed=False):
+    if safe_descent_enabled and safe_descent_completed:
+        return "SAFE DESCENT COMPLETE: locked plan ready, press R"
     if not preview.get("ready"):
         return "GRASP PREVIEW: " + preview.get("reason", "waiting")
     endpoint = preview["endpoint_xyz_m"]
     if safe_descent_enabled:
-        if safe_descent_completed:
-            return "SAFE DESCENT COMPLETE: locked center, no further motion"
         if ready_streak >= SAFE_DESCENT_CONFIRM_FRAMES:
             return "SAFE DESCENT READY %d/%d: press D, stop %.0fmm above tool" % (
                 ready_streak, SAFE_DESCENT_CONFIRM_FRAMES,
@@ -1820,12 +1817,15 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
                   calibration, current_target, grip_profile=None):
     """Run the guarded final grasp.
 
-    Returns ``(status, message)`` where status is ``"waiting"`` (not ready yet),
-    ``"done"`` or ``"failed"``.  Shared by the manual R key and the one-key grasp.
+    Returns ``(status, message)`` where status is ``"done"`` or ``"failed"``.
+    Shared by the manual R key and the one-key grasp.
+
+    D has already locked the target, grasp height, support plane and orientation.
+    At the 40 mm stop the fingers commonly occlude a small tool, so an unstable
+    close-range segmentation is diagnostic only and must not invalidate that
+    locked plan.  A still-trusted live target is retained as an extra movement
+    check.
     """
-    if not (hi_gate["passed"] and (hi_handle is not None or grip_profile is not None)
-            and current_target is not None):
-        return "waiting", "等待稳定抓取区域和当前目标。"
     if locked_handle is None or "grasp_tcp_z_m" not in locked_handle:
         return "failed", "未记录自适应夹持高度；请重新运行下降。"
     locked_plane_z = locked_handle.get("support_plane_z_m")
@@ -1846,9 +1846,12 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
               (float(locked_plane_z), float(current_support_plane.z_m),
                close_delta * 1000.0))
     locked_target = np.asarray(locked_handle["target_base_xyz_m"], dtype=np.float64)
-    target_shift = float(np.linalg.norm(
-        np.asarray(current_target, dtype=np.float64) - locked_target))
-    if target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
+    target_shift = trusted_target_shift_m(
+        locked_target, current_target, hi_gate,
+        live_region_available=(hi_handle is not None or grip_profile is not None))
+    if target_shift is None:
+        print("[低位视觉诊断] 夹爪遮挡导致当前目标未稳定；使用D前锁定的抓取计划。")
+    elif target_shift > SCREWDRIVER_TARGET_SHIFT_MAX_M:
         return "failed", "目标在下降后移动 %.1fmm。" % (target_shift * 1000.0)
     ok = execute_guarded_grasp(
         robot, locked_target, float(locked_handle["grasp_tcp_z_m"]),
@@ -1856,6 +1859,17 @@ def attempt_grasp(robot, locked_handle, hi_gate, hi_handle, current_support_plan
         orientation=locked_handle.get("orientation", TOOL_ORIENTATION),
         grip_profile=grip_profile)
     return ("done", None) if ok else ("failed", "夹持未完成（力矩或姿态未通过）。")
+
+
+def trusted_target_shift_m(locked_target, current_target, hi_gate,
+                           live_region_available=True):
+    """Return live target displacement only when the low-view result is trusted."""
+    if (not live_region_available or not hi_gate.get("passed")
+            or current_target is None):
+        return None
+    locked = np.asarray(locked_target, dtype=np.float64).reshape(3)
+    current = np.asarray(current_target, dtype=np.float64).reshape(3)
+    return float(np.linalg.norm(current - locked))
 
 
 def parse_args():
