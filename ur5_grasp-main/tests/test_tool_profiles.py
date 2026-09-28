@@ -29,7 +29,19 @@ class ProfileTests(unittest.TestCase):
                             encoding="utf-8")
             profile = load_tool_profile(path, "adjustable wrench", LIMITS)
             self.assertTrue(profile["requires_angle"])
+            self.assertEqual(profile["open_position"], 4000)
             self.assertEqual(profile["close_position"], 11000)
+
+    def test_legacy_per_tool_opening_is_replaced_by_universal_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profiles.json"
+            data = {"approved_for_this_cell": True, "grasp_tcp_z_m": 0.03,
+                    "open_position": 6000, "close_position": 11000,
+                    "grip_force": 30, "requires_angle": False}
+            path.write_text(json.dumps({"tools": {"tape measure": data}}),
+                            encoding="utf-8")
+            profile = load_tool_profile(path, "tape measure", LIMITS)
+        self.assertEqual(profile["open_position"], 4000)
 
 
 if __name__ == "__main__":

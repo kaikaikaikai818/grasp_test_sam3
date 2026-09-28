@@ -45,7 +45,7 @@ from bsp.camera_bsp.camera_alignment import (apply_alignment,
 from bsp.camera_bsp.camera_profile import max_intrinsics_delta
 from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
-from bsp.camera_bsp.tool_profiles import load_tool_profile
+from bsp.camera_bsp.tool_profiles import UNIVERSAL_OPEN_POSITION, load_tool_profile
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
                                                 principal_axis_base)
@@ -153,7 +153,7 @@ POST_GRASP_RETURN_LIFT_M = 0.010
 
 # 夹爪
 GRIP_PORT = "COM10"
-GRIP_OPEN_POS = 6000          # 张开
+GRIP_OPEN_POS = UNIVERSAL_OPEN_POSITION  # 所有工具统一张开到 4000
 GRIP_CLOSE_POS = 11000        # 闭合（参考仓库值，可用 --gripper-test 校定）
 GRIP_SPEED = 50
 GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
