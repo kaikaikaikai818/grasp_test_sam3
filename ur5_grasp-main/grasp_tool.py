@@ -104,17 +104,22 @@ SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M = 0.015
 SCREWDRIVER_ASSOCIATION_Z_MAX_M = 0.015
 SAFE_APPROACH_CONFIRM_FRAMES = 3
 SAFE_TRAVEL_Z_M = 0.25
-SAFE_APPROACH_SPEED = 0.03
-SAFE_APPROACH_ACCELERATION = 0.03
+# 高位通行只在 z>=250mm 执行，可以比靠近工具时更快。近桌面的两段下降
+# 继续分别使用受控接近速度和最终低速，不能共用一个全程低速常量。
+SAFE_APPROACH_SPEED = 0.20
+SAFE_APPROACH_ACCELERATION = 0.20
 # 观察点后的抓取预览：只显示计划，不会产生任何运动命令。
 GRASP_PREVIEW_HEIGHT_M = 0.10
 GRASP_PREVIEW_SURFACE_CLEARANCE_M = 0.025
 # 第一次实体下降保留更大的 40mm 间隙，不使用虚拟预览的 25mm 终点。
 SAFE_DESCENT_CLEARANCE_M = 0.040
 SAFE_DESCENT_CONFIRM_FRAMES = 3
-SAFE_DESCENT_SPEED = 0.01
-SAFE_DESCENT_ACCELERATION = 0.01
+SAFE_DESCENT_TRANSIT_SPEED = 0.10
+SAFE_DESCENT_TRANSIT_ACCELERATION = 0.10
+SAFE_DESCENT_SPEED = 0.03
+SAFE_DESCENT_ACCELERATION = 0.03
 SCREWDRIVER_GRASP_SPEED = 0.01
+POST_GRASP_LIFT_SPEED = 0.05
 SCREWDRIVER_GRASP_FORCE = 30
 SCREWDRIVER_TEST_LIFT_M = 0.050
 SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
@@ -353,6 +358,9 @@ def main():
     print("\n操作说明:")
     print("  [安全确认] 示教器活动TCP必须是 TCP_clamp，摆正路径周围必须无遮挡。")
     print("  当前目标: %s（双视场文字识别）。" % TEXT_PROMPT)
+    print("  [分级速度] 高位=%.2fm/s，远距下降=%.2fm/s，受控接近=%.2fm/s，最终夹持=%.2fm/s。" %
+          (SAFE_APPROACH_SPEED, SAFE_DESCENT_TRANSIT_SPEED,
+           SAFE_DESCENT_SPEED, SCREWDRIVER_GRASP_SPEED))
     surface_calibration_error = None
     try:
         surface_calibration = load_calibration(
@@ -1586,9 +1594,13 @@ def move_to_safe_observation(robot, destination_xyz):
         straighten_target = after_lift.copy()
         straighten_target[2] = max(float(after_lift[2]), SAFE_TRAVEL_Z_M)
         straighten_target[3:6] = TOOL_ORIENTATION
-        print("[观察点] 安全高度摆正末端")
-        robot.moveL(straighten_target.tolist(), speed=SAFE_APPROACH_SPEED,
-                    acceleration=SAFE_APPROACH_ACCELERATION)
+        orientation_error = _orientation_error_deg(after_lift[3:6], TOOL_ORIENTATION)
+        if orientation_error > 0.2:
+            print("[观察点] 安全高度摆正末端")
+            robot.moveL(straighten_target.tolist(), speed=SAFE_APPROACH_SPEED,
+                        acceleration=SAFE_APPROACH_ACCELERATION)
+        else:
+            print("[观察点] 末端已经摆正，跳过重复姿态运动。")
         if not verify_tool_orientation(robot, "观察点摆正后"):
             return False
 
@@ -1695,14 +1707,14 @@ def move_to_safe_descent_test(robot, preview):
         high_align[3:6] = orientation
         print("[无接触下降] 安全高度对准 XY=%s" %
               ["%.4f" % value for value in high_align[0:3]])
-        robot.moveL(high_align.tolist(), speed=SAFE_DESCENT_SPEED,
-                    acceleration=SAFE_DESCENT_ACCELERATION)
+        robot.moveL(high_align.tolist(), speed=SAFE_DESCENT_TRANSIT_SPEED,
+                    acceleration=SAFE_DESCENT_TRANSIT_ACCELERATION)
 
         pregrasp_pose = pregrasp.tolist() + list(orientation)
         print("[无接触下降] 下降到预抓取高度=%s" %
               ["%.4f" % value for value in pregrasp_pose])
-        robot.moveL(pregrasp_pose, speed=SAFE_DESCENT_SPEED,
-                    acceleration=SAFE_DESCENT_ACCELERATION)
+        robot.moveL(pregrasp_pose, speed=SAFE_DESCENT_TRANSIT_SPEED,
+                    acceleration=SAFE_DESCENT_TRANSIT_ACCELERATION)
         if not verify_tool_orientation(robot, "预抓取高度", orientation):
             return False
 
@@ -1775,9 +1787,13 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
         high_align[3:6] = orientation
         if robot.grip(open_position, GRIP_OPEN_SPEED, GRIP_OPEN_FORCE) == -1:
             raise RuntimeError("gripper did not open")
-        print("[%s抓取] 在安全高度对准抓取区域。" % tool_label)
-        robot.moveL(high_align.tolist(), speed=SCREWDRIVER_GRASP_SPEED,
-                    acceleration=SCREWDRIVER_GRASP_SPEED)
+        align_error_m = float(np.linalg.norm(current[:3] - high_align[:3]))
+        if align_error_m > 0.0005:
+            print("[%s抓取] 在40mm无接触点微调抓取区域。" % tool_label)
+            robot.moveL(high_align.tolist(), speed=SCREWDRIVER_GRASP_SPEED,
+                        acceleration=SCREWDRIVER_GRASP_SPEED)
+        else:
+            print("[%s抓取] 已在锁定抓取区域，跳过重复对准运动。" % tool_label)
         print("[%s抓取] 低速下降到夹持高度=%s" %
               (tool_label, ["%.4f" % value for value in final]))
         robot.moveL(final.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
@@ -1805,8 +1821,8 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
             print("[安全中止] %.0fmm 测试抬升点超出工作空间；不抬升。"
                   % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
             return False
-        robot.moveL(lift.tolist() + list(orientation), speed=SCREWDRIVER_GRASP_SPEED,
-                    acceleration=SCREWDRIVER_GRASP_SPEED)
+        robot.moveL(lift.tolist() + list(orientation), speed=POST_GRASP_LIFT_SPEED,
+                    acceleration=POST_GRASP_LIFT_SPEED)
         print("[%s抓取完成] reached=%s torque=%s command_position=%s；"
               "已低力夹持并抬升 %.0fmm，停在抬升位置。"
               % (tool_label, torque_reached, torque_current, closed_position,
