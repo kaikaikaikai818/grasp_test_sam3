@@ -28,6 +28,10 @@ class GripContactTests(unittest.TestCase):
     def test_strict_contact_requires_flag_and_force(self):
         self.assertTrue(grip_contact_confirmed(1, 120, 80, mode="both"))
 
+    def test_pliers_low_force_ceiling_passes_calibrated_minimum(self):
+        self.assertTrue(grip_contact_confirmed(1, 80, 79, mode="both"))
+        self.assertFalse(grip_contact_confirmed(0, 80, 79, mode="both"))
+
     def test_contact_wait_allows_slow_fingers_to_reach_object(self):
         class Robot:
             reached = iter((0, 0, 1))

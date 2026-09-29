@@ -220,7 +220,10 @@ TAPE_MEASURE_TEST_TORQUE_MIN = 80
 TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
 PLIERS_TEST_GRIP_FORCE = 20
-PLIERS_TEST_TORQUE_MIN = 80
+# At force=20 the controller's observed torque ceiling is 80.  The strict
+# two-signal check uses ``current > minimum``, so 80 would be impossible to
+# accept with a minimum of 80 even when the controller reports reached=1.
+PLIERS_TEST_TORQUE_MIN = 79
 # Field trials still place the pads on the upper half of the handles.  Lower
 # only the pliers TCP by another 2 mm.  A dedicated positive 3 mm plane margin
 # remains the final collision guard; other tools retain the shared 5 mm floor.
