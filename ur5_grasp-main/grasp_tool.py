@@ -129,7 +129,7 @@ SAFE_DESCENT_SPEED = 0.05
 SAFE_DESCENT_ACCELERATION = 0.05
 SCREWDRIVER_GRASP_SPEED = 0.03
 POST_GRASP_LIFT_SPEED = 0.10
-SCREWDRIVER_GRASP_FORCE = 30
+SCREWDRIVER_GRASP_FORCE = 35
 SCREWDRIVER_TEST_LIFT_M = 0.050
 SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
 SCREWDRIVER_R_START_TOL_M = 0.015
@@ -156,9 +156,12 @@ CAM_INI = str(SCRIPT_ROOT / "camera_20260906.ini")
 CAM2END_PATH = str(SCRIPT_ROOT / "cam2end_20260906.txt")
 CAMERA_ALIGNMENT_PATH = SCRIPT_ROOT / "camera_alignment.json"
 GRASP_SURFACE_CALIBRATION_PATH = SCRIPT_ROOT / "grasp_surface_calibration.json"
-# The active controller TCP named TCP_clamp is already calibrated at the jaw
-# centre.  Therefore the jaw centre and commanded TCP share the same Z height.
-TCP_CLAMP_GRIP_CENTER_OFFSET_M = 0.0
+# Field checks across the screwdriver and pliers showed that the physical pad
+# contact band sits about 3 mm below the height represented by TCP_clamp.  This
+# one gripper-geometry correction is shared by every adaptive tool; individual
+# tool thickness is still measured on every attempt and the 5 mm plane floor
+# remains the final collision guard.
+TCP_CLAMP_GRIP_CENTER_OFFSET_M = -0.003
 
 # 手外 D455 内参（与 camera_pose.txt 标定时所用一致）
 HO_FX = 386.471
@@ -192,8 +195,9 @@ GRIP_SPEED = 50
 GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
 GRIP_OPEN_SPEED = 100
 GRIP_OPEN_FORCE = 40
-# 螺丝刀使用力度30的低力夹持。实机细手柄接触时可能只报告约38的实时力矩，
-# 因此使用30作为下限。夹爪的 position 寄存器会回显命令值，不能用于判断接触。
+# 螺丝刀使用力度35的低力夹持，以减少浅接触抬升后的滑落。实机细手柄接触时
+# 可能只报告约38的实时力矩，因此仍使用30作为反馈下限；严格模式还要求接触
+# 标志同时成立。夹爪的 position 寄存器会回显命令值，不能用于判断接触。
 GRIP_TORQUE_MIN = 30
 # 卷尺首次实体抓取只使用已经通过螺丝刀实测的闭合终点，并进一步降低力度。
 # 该模式仍要求 P -> D -> R，且只抬升 50mm；失败会自动张开并退回。
@@ -1859,7 +1863,11 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
                   else grip_profile["grip_force"])
     torque_min = (GRIP_TORQUE_MIN if grip_profile is None
                   else grip_profile["torque_min"])
-    contact_mode = ("either" if grip_profile is None
+    # The built-in screwdriver path previously accepted torque alone.  Field
+    # evidence showed a shallow, slipping grasp can produce reached=0 with a
+    # moderate current, so it now uses the same two-signal confirmation as the
+    # pliers profile.
+    contact_mode = ("both" if grip_profile is None
                     else grip_profile.get("contact_mode", "either"))
     tool_label = "螺丝刀" if grip_profile is None else grip_profile.get("tool_label", "工具")
     final = target.copy()

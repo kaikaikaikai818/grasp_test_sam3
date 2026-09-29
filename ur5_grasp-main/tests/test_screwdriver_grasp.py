@@ -74,6 +74,15 @@ class ScrewdriverGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(tcp_z, 0.0512, places=4)
         self.assertAlmostEqual(plan["support_plane_z_m"], 0.0215, places=4)
 
+    def test_negative_pad_center_offset_lowers_adaptive_grasp(self):
+        tcp_z, plan = plan_grasp_tcp(
+            0.0316, 0.0214, gripper_offset_m=-0.003,
+            center_bias_m=-0.003, minimum_clearance_m=0.005)
+        self.assertIsNotNone(tcp_z, plan)
+        self.assertAlmostEqual(tcp_z, 0.0312, places=4)
+        self.assertAlmostEqual(plan["handle_mid_z_m"], 0.0372, places=4)
+        self.assertAlmostEqual(plan["gripper_offset_m"], -0.003, places=4)
+
     def test_descent_locks_saved_plane_before_motion(self):
         locked, reason = locked_support_plane_z(
             {"support_plane_z_m": 0.0214},
