@@ -41,6 +41,20 @@ class TapeMeasureGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(plan["body_thickness_m"], 0.0136, places=4)
         self.assertGreaterEqual(tcp_z - 0.0214, 0.008)
 
+    def test_pliers_downward_bias_reaches_five_mm_clearance_floor(self):
+        tcp_z, plan = plan_tape_measure_grasp(
+            0.0380, 0.0214,
+            center_bias_m=-0.005,
+            minimum_clearance_m=0.005,
+            minimum_thickness_m=0.008,
+            maximum_thickness_m=0.060,
+            object_label="pliers handle",
+            tool_category="pliers")
+        self.assertIsNotNone(tcp_z, plan)
+        self.assertAlmostEqual(tcp_z, 0.0264, places=4)
+        self.assertAlmostEqual(tcp_z - plan["support_plane_z_m"], 0.005,
+                               places=4)
+
     def test_implausibly_thick_body_is_rejected(self):
         tcp_z, reason = plan_tape_measure_grasp(0.1500, 0.0214)
         self.assertIsNone(tcp_z)

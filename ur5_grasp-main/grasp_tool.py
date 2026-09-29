@@ -206,7 +206,10 @@ TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
 PLIERS_TEST_GRIP_FORCE = 20
 PLIERS_TEST_TORQUE_MIN = 80
-PLIERS_GRASP_CENTER_BIAS_M = 0.0
+# The verified handle midpoint still left the fingertips about 1.8 mm high.
+# Bias the pliers plan down; the shared 5 mm support-plane floor remains the
+# final collision guard and prevents this correction from going any lower.
+PLIERS_GRASP_CENTER_BIAS_M = -0.005
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
@@ -1943,12 +1946,15 @@ def grip_contact_confirmed(torque_reached, torque_current, torque_min,
                            mode="either"):
     """Confirm low-force contact from the gripper's torque feedback."""
     reached = int(torque_reached) == 1
-    current_high = int(torque_current) >= int(torque_min)
+    current = int(torque_current)
     if mode == "both":
-        return reached and current_high
+        # The empty gripper can report exactly the configured threshold when
+        # it reaches its mechanical closing stop.  A strict profile therefore
+        # requires force above that boundary as well as the contact flag.
+        return reached and current > int(torque_min)
     if mode != "either":
         raise ValueError("unknown gripper contact confirmation mode")
-    return reached or current_high
+    return reached or current >= int(torque_min)
 
 
 def attempt_descent(robot, grasp_preview, current_support_plane, calibration=None):

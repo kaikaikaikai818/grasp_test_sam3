@@ -19,6 +19,9 @@ class GripContactTests(unittest.TestCase):
     def test_strict_contact_rejects_flag_without_force(self):
         self.assertFalse(grip_contact_confirmed(1, 20, 80, mode="both"))
 
+    def test_strict_contact_rejects_mechanical_stop_at_threshold(self):
+        self.assertFalse(grip_contact_confirmed(1, 80, 80, mode="both"))
+
     def test_strict_contact_rejects_force_without_flag(self):
         self.assertFalse(grip_contact_confirmed(0, 120, 80, mode="both"))
 
