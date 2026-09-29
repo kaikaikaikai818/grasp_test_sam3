@@ -217,10 +217,11 @@ TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
 PLIERS_TEST_GRIP_FORCE = 20
 PLIERS_TEST_TORQUE_MIN = 80
-# The verified handle midpoint still left the fingertips about 1.8 mm high.
-# Bias the pliers plan down; the shared 5 mm support-plane floor remains the
-# final collision guard and prevents this correction from going any lower.
-PLIERS_GRASP_CENTER_BIAS_M = -0.005
+# Field trials still place the pads on the upper half of the handles.  Lower
+# only the pliers TCP by another 2 mm.  A dedicated positive 3 mm plane margin
+# remains the final collision guard; other tools retain the shared 5 mm floor.
+PLIERS_GRASP_CENTER_BIAS_M = -0.007
+PLIERS_MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.003
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
@@ -279,6 +280,7 @@ def main():
             "grip_force": PLIERS_TEST_GRIP_FORCE,
             "torque_min": PLIERS_TEST_TORQUE_MIN,
             "contact_mode": "both",
+            "minimum_clearance_m": PLIERS_MIN_GRASP_TCP_PLANE_CLEARANCE_M,
             "requires_angle": True,
         }
     profile_required = (
@@ -1316,7 +1318,9 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
             float(calibration["gripper_offset_m"]),
             center_bias_m=(TAPE_MEASURE_GRASP_CENTER_BIAS_M
                            if adaptive_body else PLIERS_GRASP_CENTER_BIAS_M),
-            minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M,
+            minimum_clearance_m=(MIN_GRASP_TCP_PLANE_CLEARANCE_M
+                                 if adaptive_body
+                                 else PLIERS_MIN_GRASP_TCP_PLANE_CLEARANCE_M),
             minimum_thickness_m=(0.008 if adaptive_pliers else 0.015),
             maximum_thickness_m=(0.060 if adaptive_pliers else 0.100),
             object_label=("pliers handle" if adaptive_pliers
@@ -1918,10 +1922,14 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
     final = target.copy()
     final[2] = float(grasp_tcp_z)
     plane_clearance = final[2] - float(support_plane_z_m)
-    if plane_clearance < MIN_GRASP_TCP_PLANE_CLEARANCE_M:
+    minimum_clearance = (MIN_GRASP_TCP_PLANE_CLEARANCE_M
+                         if grip_profile is None else float(grip_profile.get(
+                             "minimum_clearance_m",
+                             MIN_GRASP_TCP_PLANE_CLEARANCE_M)))
+    if plane_clearance < minimum_clearance:
         print("[安全中止] 夹持TCP离支撑面仅 %.1fmm（至少需要 %.1fmm），拒绝执行。" %
               (plane_clearance * 1000.0,
-               MIN_GRASP_TCP_PLANE_CLEARANCE_M * 1000.0))
+               minimum_clearance * 1000.0))
         return False
     retreat = final.copy()
     retreat[2] += SAFE_DESCENT_CLEARANCE_M
