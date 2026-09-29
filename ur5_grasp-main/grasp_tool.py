@@ -569,27 +569,20 @@ def main():
                 else:
                     raw_hi = detector.detect(
                         hi_color, hi_depth, robot.camera.scale)
-                hi_prefilter_reason = None
-                if tool_category == "pliers" and raw_hi is not None:
-                    candidate, hi_prefilter_reason = propose_grasp_region(
-                        raw_hi["mask"], hi_depth, robot.camera.scale, tool_category)
-                    if candidate is None:
-                        raw_hi = None
-                    else:
-                        raw_hi = dict(raw_hi)
-                        raw_hi["center"] = candidate.center_px
-                        raw_hi["z_mm"] = candidate.depth_m * 1000.0
-                        hi_prefilter_reason = None
+                # The close wrist view has enough pixels for the whole-tool
+                # center to stabilize reliably.  Refine to the pliers handle
+                # midpoint only after that three-frame lock; doing the shape
+                # check before the filter made one-frame occlusions reset the
+                # stability streak after wrist rotation.
                 res_hi, hi_status = hi_filter.update(raw_hi)
-                hi_handle_reason = hi_prefilter_reason
                 if (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_hi is not None
                         and hi_status == "STABLE"):
                     hi_handle, hi_handle_reason = find_screwdriver_handle(
                         res_hi, hi_depth, robot.camera.scale)
                     if hi_handle is not None:
                         res_hi = result_at_handle(res_hi, hi_handle)
-                elif (tool_category is not None and tool_category != "pliers"
-                      and res_hi is not None and hi_status == "STABLE"):
+                elif (tool_category is not None and res_hi is not None
+                      and hi_status == "STABLE"):
                     candidate, hi_handle_reason = propose_grasp_region(
                         res_hi["mask"], hi_depth, robot.camera.scale, tool_category)
                     if candidate is not None:
