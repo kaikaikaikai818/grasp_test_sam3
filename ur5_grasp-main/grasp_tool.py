@@ -53,7 +53,8 @@ from bsp.camera_bsp.tape_measure_grasp import (isolate_tape_measure_body,
                                                 select_tape_measure_body_result)
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
-                                                principal_axis_base)
+                                                principal_axis_base,
+                                                rectangular_edge_axis_base)
 from bsp.camera_bsp.screwdriver_grasp import (base_point_m,
                                                estimate_handle_thickness,
                                                find_screwdriver_handle,
@@ -590,10 +591,17 @@ def main():
                                 if orientation_mask is None:
                                     angle_history.clear()
                                 else:
-                                    current_axis, angle_reason = principal_axis_base(
-                                        orientation_mask, hi_depth * robot.camera.scale,
-                                        hi_pixel_to_base,
-                                        minimum_eigenvalue_ratio=minimum_axis_ratio)
+                                    if tool_category == "tape measure":
+                                        current_axis, angle_reason = rectangular_edge_axis_base(
+                                            orientation_mask,
+                                            hi_depth * robot.camera.scale,
+                                            hi_pixel_to_base)
+                                    else:
+                                        current_axis, angle_reason = principal_axis_base(
+                                            orientation_mask,
+                                            hi_depth * robot.camera.scale,
+                                            hi_pixel_to_base,
+                                            minimum_eigenvalue_ratio=minimum_axis_ratio)
                                 if current_axis is not None:
                                     angle_history.append(current_axis)
                                     current_orientation = overhead_orientation(

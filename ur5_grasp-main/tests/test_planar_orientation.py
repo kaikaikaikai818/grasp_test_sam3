@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                overhead_orientation,
-                                               principal_axis_base)
+                                               principal_axis_base,
+                                               rectangular_edge_axis_base)
 
 
 class PlanarOrientationTests(unittest.TestCase):
@@ -57,6 +58,21 @@ class PlanarOrientationTests(unittest.TestCase):
                                  quarter_turn_symmetric=True),
             0.0, places=5)
         self.assertGreater(axial_difference_deg(0.0, np.pi / 2), 80.0)
+
+    def test_square_case_uses_box_edge_instead_of_pca_diagonal(self):
+        mask = np.zeros((180, 180), dtype=np.uint8)
+        box = cv2.boxPoints(((90, 90), (84, 78), 27.0)).astype(np.int32)
+        cv2.fillConvexPoly(mask, box, 1)
+        # Add an asymmetric clip-like patch that pulls PCA off a case edge.
+        mask[65:85, 105:132] = 1
+        angle, reason = rectangular_edge_axis_base(
+            mask.astype(bool), np.full(mask.shape, 0.5),
+            lambda u, v, z: np.array([u * .001, v * .001, z]))
+        self.assertIsNone(reason)
+        self.assertLess(
+            axial_difference_deg(angle, np.deg2rad(27.0),
+                                 quarter_turn_symmetric=True),
+            4.0)
 
 
 if __name__ == "__main__":

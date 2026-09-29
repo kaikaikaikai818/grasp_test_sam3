@@ -5,13 +5,7 @@ import cv2
 import numpy as np
 
 
-def principal_axis_base(mask, depth_m, pixel_to_base, stride=4,
-                        minimum_eigenvalue_ratio=2.0):
-    """Return undirected tool-axis angle in base XY, or a rejection reason.
-
-    Pixel samples use the measured depth at each point. This handles a wrist
-    camera that is itself rotated relative to the robot base.
-    """
+def _base_xy_samples(mask, depth_m, pixel_to_base, stride):
     binary = np.asarray(mask, dtype=bool)
     depths = np.asarray(depth_m, dtype=np.float64)
     if binary.ndim != 2 or binary.shape != depths.shape:
@@ -30,12 +24,47 @@ def principal_axis_base(mask, depth_m, pixel_to_base, stride=4,
             points.append(point[:2])
     if len(points) < 20:
         return None, "too few 3-D mask samples for orientation"
-    coords = np.asarray(points)
+    return np.asarray(points), None
+
+
+def principal_axis_base(mask, depth_m, pixel_to_base, stride=4,
+                        minimum_eigenvalue_ratio=2.0):
+    """Return undirected tool-axis angle in base XY, or a rejection reason.
+
+    Pixel samples use the measured depth at each point. This handles a wrist
+    camera that is itself rotated relative to the robot base.
+    """
+    coords, reason = _base_xy_samples(mask, depth_m, pixel_to_base, stride)
+    if coords is None:
+        return None, reason
     eigenvalues, eigenvectors = np.linalg.eigh(np.cov(coords, rowvar=False))
     if (eigenvalues[0] <= 0
             or eigenvalues[1] / eigenvalues[0] < float(minimum_eigenvalue_ratio)):
         return None, "tool has no reliable planar long axis"
     axis = eigenvectors[:, 1]
+    return float(np.arctan2(axis[1], axis[0]) % np.pi), None
+
+
+def rectangular_edge_axis_base(mask, depth_m, pixel_to_base, stride=3):
+    """Return a rectangular case edge instead of its PCA diagonal.
+
+    A nearly square tape-measure case has no reliable long axis.  Small
+    asymmetries such as its belt clip can make PCA point toward a diagonal.
+    Fitting the minimum-area rectangle in base XY keeps the grasp parallel to
+    a real case side; the caller may treat the two orthogonal sides as
+    equivalent and choose the one requiring the smallest wrist rotation.
+    """
+    coords, reason = _base_xy_samples(mask, depth_m, pixel_to_base, stride)
+    if coords is None:
+        return None, reason
+    rectangle = cv2.minAreaRect(coords.astype(np.float32).reshape(-1, 1, 2))
+    box = cv2.boxPoints(rectangle).astype(np.float64)
+    edges = np.roll(box, -1, axis=0) - box
+    lengths = np.linalg.norm(edges, axis=1)
+    index = int(np.argmax(lengths))
+    if not np.isfinite(lengths[index]) or lengths[index] < 0.015:
+        return None, "tape-measure case rectangle is too small"
+    axis = edges[index] / lengths[index]
     return float(np.arctan2(axis[1], axis[0]) % np.pi), None
 
 
