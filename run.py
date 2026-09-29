@@ -27,12 +27,12 @@ TOOLS = (
     ToolEntry("1", "螺丝刀", "screwdriver", ("螺丝刀", "screwdriver"),
               "operational", "已通过大、小两把螺丝刀实机回归"),
     ToolEntry("2", "卷尺", "tape measure", ("卷尺", "tape", "tape measure"),
-              "validation", "已能抓取，仍需完成两次最终回归"),
+              "operational", "已通过多个角度实机回归"),
     ToolEntry("3", "活动扳手", "adjustable wrench",
               ("活动扳手", "扳手", "adjustable wrench"),
               "pending", "尚未完成视觉、无接触与低力抓取验收"),
     ToolEntry("4", "钳子", "pliers", ("钳子", "pliers"),
-              "pending", "尚未完成视觉、无接触与低力抓取验收"),
+              "validation", "先完成视觉、方向与40 mm无接触验收"),
     ToolEntry("5", "胶带切割器", "tape dispenser",
               ("胶带切割器", "胶带座", "tape dispenser"),
               "pending", "尚未完成视觉、无接触与低力抓取验收"),
@@ -62,6 +62,8 @@ def build_core_command(tool: ToolEntry, python: str | None = None) -> list[str]:
         command.append("--auto")
     if tool.prompt == "tape measure":
         command.append("--tape-grasp-test")
+    if tool.prompt == "pliers":
+        command.append("--pliers-grasp-test")
     return command
 
 
@@ -80,9 +82,11 @@ def print_run_instructions(tool: ToolEntry) -> None:
         print("等待 D455 目标稳定并确认路径清空后，只需按一次小写 a。")
         print("之后程序自动完成高位观察、D435i 精定位、方向对齐、下降、")
         print("低力夹持和 50 mm 试抬升。完成后按 o 松开，按 q 退出。")
+    elif tool.prompt == "pliers":
+        print("钳子当前处于首次验收：按 P → Y → D，只检查手柄中段和40 mm间隙。")
+        print("本次先不要按 R；确认抓取中心位于两条手柄中段之间后再继续。")
     else:
-        print("卷尺当前仍处于最终验收：按 P → Y → D，检查 40 mm 间隙后按 R。")
-        print("成功后按 O 松开、按 U 回升；连续两次成功后再切换为自动流程。")
+        print("当前工具处于分步验收，先检查视觉、方向和40 mm无接触终点。")
     print("运行前确认示教器活动 TCP 为 TCP_clamp，并保持急停可用。\n")
 
 

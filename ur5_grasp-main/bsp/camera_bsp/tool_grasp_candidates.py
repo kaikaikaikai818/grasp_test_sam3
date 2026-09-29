@@ -28,6 +28,8 @@ def propose_grasp_region(mask, depth_raw, depth_scale, tool):
                     "pliers"):
         return None, "no visual grasp strategy for this tool"
     distances = cv2.distanceTransform(binary.astype(np.uint8), cv2.DIST_L2, 5)
+    if tool == "pliers":
+        return _propose_pliers_handles(binary, depth)
     if tool == "tape measure":
         _, radius, _, (u, v) = cv2.minMaxLoc(distances)
         if radius < 5:
@@ -69,3 +71,56 @@ def propose_grasp_region(mask, depth_raw, depth_scale, tool):
         return None, "insufficient depth at proposed grasp region"
     return GraspCandidate((int(u), int(v)), float(np.median(samples)),
                           float(radius), "interior handle/body candidate"), None
+
+
+def _propose_pliers_handles(binary, depth):
+    """Place the grasp center between the two handles, away from jaws/pivot."""
+    ys, xs = np.nonzero(binary)
+    coords = np.column_stack((xs, ys)).astype(float)
+    center = coords.mean(axis=0)
+    values, vectors = np.linalg.eigh(np.cov(coords, rowvar=False))
+    if values[0] <= 0 or values[1] / values[0] < 2.0:
+        return None, "pliers long axis is not distinguishable"
+    axis = vectors[:, 1]
+    lateral_axis = np.asarray([-axis[1], axis[0]])
+    relative = coords - center
+    along = relative @ axis
+    lateral = relative @ lateral_axis
+    minimum, maximum = np.percentile(along, [2, 98])
+    length = float(maximum - minimum)
+    if length < 35:
+        return None, "pliers are too short in image"
+
+    end_masks = (along <= minimum + 0.25 * length,
+                 along >= maximum - 0.25 * length)
+    spans = []
+    for end in end_masks:
+        if np.count_nonzero(end) < 30:
+            spans.append(0.0)
+        else:
+            low, high = np.percentile(lateral[end], [5, 95])
+            spans.append(float(high - low))
+    handle_is_low = spans[0] > spans[1]
+    handle_span = max(spans)
+    if handle_span < 12 or max(spans) < min(spans) * 1.20:
+        return None, "pliers handle end is not distinct from jaws"
+
+    target_along = (minimum + 0.28 * length if handle_is_low
+                    else maximum - 0.28 * length)
+    band = np.abs(along - target_along) <= 0.08 * length
+    if np.count_nonzero(band) < 30:
+        return None, "pliers handle band is incomplete"
+    low, high = np.percentile(lateral[band], [5, 95])
+    target_lateral = float((low + high) / 2.0)
+    point = center + axis * target_along + lateral_axis * target_lateral
+    u, v = int(round(point[0])), int(round(point[1]))
+    if not (0 <= u < binary.shape[1] and 0 <= v < binary.shape[0]):
+        return None, "pliers handle center lies outside image"
+
+    samples = depth[ys[band], xs[band]]
+    samples = samples[np.isfinite(samples) & (samples >= .15) & (samples <= 2)]
+    if samples.size < 15:
+        return None, "insufficient depth on pliers handles"
+    return GraspCandidate(
+        (u, v), float(np.median(samples)), handle_span / 2.0,
+        "center between pliers handle pair"), None

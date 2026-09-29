@@ -23,14 +23,19 @@ class MainLauncherTests(unittest.TestCase):
         self.assertNotIn("--tape-grasp-test", command)
         self.assertEqual(command[command.index("--prompt") + 1], "screwdriver")
 
-    def test_tape_stays_in_final_manual_validation(self):
+    def test_tape_uses_automatic_validated_flow(self):
         command = MODULE.build_core_command(MODULE.resolve_tool("卷尺"), python="python")
-        self.assertNotIn("--auto", command)
+        self.assertIn("--auto", command)
         self.assertIn("--tape-grasp-test", command)
+
+    def test_pliers_uses_manual_validation_profile(self):
+        command = MODULE.build_core_command(MODULE.resolve_tool("钳子"), python="python")
+        self.assertNotIn("--auto", command)
+        self.assertIn("--pliers-grasp-test", command)
 
     def test_unvalidated_tool_never_builds_robot_command(self):
         with self.assertRaisesRegex(ValueError, "暂不开放"):
-            MODULE.build_core_command(MODULE.resolve_tool("钳子"), python="python")
+            MODULE.build_core_command(MODULE.resolve_tool("活动扳手"), python="python")
 
 
 if __name__ == "__main__":

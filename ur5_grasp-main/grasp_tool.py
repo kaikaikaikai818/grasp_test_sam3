@@ -197,11 +197,15 @@ GRIP_TORQUE_MIN = 30
 # 卷尺首次实体抓取只使用已经通过螺丝刀实测的闭合终点，并进一步降低力度。
 # 该模式仍要求 P -> D -> R，且只抬升 50mm；失败会自动张开并退回。
 TAPE_MEASURE_TEST_CLOSE_POS = 11000
-TAPE_MEASURE_TEST_GRIP_FORCE = 20
+TAPE_MEASURE_TEST_GRIP_FORCE = 25
 TAPE_MEASURE_TEST_TORQUE_MIN = 80
 # 实机侧视确认卷尺夹持点高于壳体中部。只修正卷尺夹持中心，并由通用
 # 8mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
 TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
+PLIERS_TEST_CLOSE_POS = 11000
+PLIERS_TEST_GRIP_FORCE = 20
+PLIERS_TEST_TORQUE_MIN = 80
+PLIERS_GRASP_CENTER_BIAS_M = 0.0
 
 WORKSPACE_LIMITS = [[-0.5, 0.05], [-0.80, -0.45], [-0.2, 0.6]]
 
@@ -233,6 +237,8 @@ def main():
         raise ValueError("human handover requires --stage grasp")
     args.vision_only = args.stage == "vision"
     profile = None
+    if args.tape_grasp_test and args.pliers_grasp_test:
+        raise ValueError("select only one tool validation profile")
     if args.tape_grasp_test:
         if tool_category != "tape measure" or args.stage != "grasp":
             raise ValueError("--tape-grasp-test requires --prompt 'tape measure' --stage grasp")
@@ -244,6 +250,19 @@ def main():
             "close_position": TAPE_MEASURE_TEST_CLOSE_POS,
             "grip_force": TAPE_MEASURE_TEST_GRIP_FORCE,
             "torque_min": TAPE_MEASURE_TEST_TORQUE_MIN,
+            "requires_angle": True,
+        }
+    elif args.pliers_grasp_test:
+        if tool_category != "pliers" or args.stage != "grasp":
+            raise ValueError("--pliers-grasp-test requires --prompt 'pliers' --stage grasp")
+        profile = {
+            "tool_label": "钳子",
+            "height_mode": "adaptive_pliers_handles",
+            "grasp_tcp_z_m": None,
+            "open_position": UNIVERSAL_OPEN_POSITION,
+            "close_position": PLIERS_TEST_CLOSE_POS,
+            "grip_force": PLIERS_TEST_GRIP_FORCE,
+            "torque_min": PLIERS_TEST_TORQUE_MIN,
             "requires_angle": True,
         }
     profile_required = (
@@ -1213,8 +1232,13 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
 
     plan = None
     grasp_tcp_z = None
-    if tool_category == "tape measure" and (
-            profile is None or profile.get("height_mode") == "adaptive_tape_body"):
+    adaptive_body = (
+        tool_category == "tape measure"
+        and (profile is None or profile.get("height_mode") == "adaptive_tape_body"))
+    adaptive_pliers = (
+        tool_category == "pliers" and profile is not None
+        and profile.get("height_mode") == "adaptive_pliers_handles")
+    if adaptive_body or adaptive_pliers:
         if calibration is None:
             preview["reason"] = "fixed support-plane calibration unavailable"
             return preview
@@ -1229,7 +1253,8 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
         grasp_tcp_z, plan = plan_tape_measure_grasp(
             float(target[2]), float(fixed_plane_z),
             float(calibration["gripper_offset_m"]),
-            center_bias_m=TAPE_MEASURE_GRASP_CENTER_BIAS_M,
+            center_bias_m=(TAPE_MEASURE_GRASP_CENTER_BIAS_M
+                           if adaptive_body else PLIERS_GRASP_CENTER_BIAS_M),
             minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M)
         if grasp_tcp_z is None:
             preview["reason"] = plan
@@ -1237,6 +1262,8 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
         plan["live_support_plane_z_m"] = float(support_plane.z_m)
         plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
         plan["profile_grasp"] = profile is not None
+        if adaptive_pliers:
+            plan["tool_category"] = "pliers"
     elif profile is not None:
         if support_plane is None:
             preview["reason"] = "support plane unavailable for tool profile"
@@ -2022,6 +2049,8 @@ def parse_args():
                    help="仅测试夹爪：交互式发送 position 并回显，用于定开/合值")
     p.add_argument("--tape-grasp-test", action="store_true",
                    help="卷尺首次低力试抓：使用动态壳体中线高度和受限夹爪参数")
+    p.add_argument("--pliers-grasp-test", action="store_true",
+                   help="钳子分步验证：夹持两条手柄中段并使用自适应高度")
     p.add_argument("--check-calib", action="store_true",
                    help="启动时读实时内参并比对标定内参，超阈值则拒绝执行")
     return p.parse_args()

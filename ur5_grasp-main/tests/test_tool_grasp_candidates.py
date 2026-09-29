@@ -48,14 +48,18 @@ class CandidateTests(unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertIn("body area", reason)
 
-    def test_pliers_candidate_uses_narrow_handle_band(self):
+    def test_pliers_candidate_centers_between_two_handle_bands(self):
         mask = np.zeros((120, 180), dtype=bool)
-        mask[35:85, 15:50] = True
-        mask[55:65, 48:165] = True
+        mask[56:64, 15:80] = True
+        mask[35:50, 75:170] = True
+        mask[70:85, 75:170] = True
         candidate, reason = propose_grasp_region(
             mask, np.full(mask.shape, 700, np.uint16), .001, "pliers")
         self.assertIsNone(reason)
-        self.assertGreater(candidate.center_px[0], 70)
+        self.assertGreater(candidate.center_px[0], 120)
+        self.assertGreater(candidate.center_px[1], 50)
+        self.assertLess(candidate.center_px[1], 70)
+        self.assertFalse(mask[candidate.center_px[1], candidate.center_px[0]])
 
 
 if __name__ == "__main__":
