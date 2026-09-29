@@ -105,6 +105,11 @@ SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M = 0.015
 SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M = 0.040
 SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M = 0.015
 SCREWDRIVER_ASSOCIATION_Z_MAX_M = 0.015
+# A compact tape-measure case is wider than the 15 mm point gate.  Both
+# cameras may validly choose different interior points on the same case, so
+# allow up to half a case width in XY while retaining the strict Z check.
+TAPE_MEASURE_ASSOCIATION_XY_MAX_M = 0.025
+TAPE_MEASURE_ASSOCIATION_Z_MAX_M = 0.015
 SAFE_APPROACH_CONFIRM_FRAMES = 3
 SAFE_TRAVEL_Z_M = 0.25
 # 高位通行只在 z>=250mm 执行，可以比靠近工具时更快。近桌面的两段下降
@@ -1019,6 +1024,8 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         "axial_distance_m": None,
         "lateral_distance_m": None,
         "vertical_distance_m": None,
+        "horizontal_distance_m": None,
+        "association_mode": "point",
     }
     if not (ho_gate["passed"] and hi_gate["passed"]):
         result["reason"] = "waiting for both validation gates"
@@ -1052,6 +1059,16 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
             axial <= SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M
             and lateral <= SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M
             and vertical <= SCREWDRIVER_ASSOCIATION_Z_MAX_M)
+        result["association_mode"] = "screwdriver_axis"
+    elif tool_category == "tape measure":
+        horizontal = float(np.linalg.norm(delta[:2]))
+        vertical = abs(float(delta[2]))
+        result["horizontal_distance_m"] = horizontal
+        result["vertical_distance_m"] = vertical
+        result["safe_approach_matched"] = bool(
+            horizontal <= TAPE_MEASURE_ASSOCIATION_XY_MAX_M
+            and vertical <= TAPE_MEASURE_ASSOCIATION_Z_MAX_M)
+        result["association_mode"] = "tape_case"
     else:
         result["safe_approach_matched"] = bool(
             distance <= SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M)
@@ -1077,6 +1094,10 @@ def association_status_text(association, safe_approach_mode=False,
             association["axial_distance_m"] * 1000.0,
             association["lateral_distance_m"] * 1000.0,
             association["vertical_distance_m"] * 1000.0)
+    elif association.get("horizontal_distance_m") is not None:
+        components = " xy=%.1f z=%.1fmm" % (
+            association["horizontal_distance_m"] * 1000.0,
+            association["vertical_distance_m"] * 1000.0)
     if safe_approach_mode:
         if approach_reason is None and ready_streak >= SAFE_APPROACH_CONFIRM_FRAMES:
             return "APPROACH READY %d/%d delta=%.1fmm%s press P" % (
@@ -1100,7 +1121,7 @@ def safe_approach_candidate(association):
     """Build a no-descent observation pose only after strict dual-camera agreement.
 
     The regular association threshold remains intentionally looser for visual
-    diagnostics. Motion uses this separate 15 mm threshold and requires the
+    diagnostics. Motion uses a strict tool-aware threshold and requires the
     saved D455/D435 alignment, so a raw D455 coordinate can never authorize P.
     """
     if not association or not association.get("available"):
@@ -1112,6 +1133,8 @@ def safe_approach_candidate(association):
     if not association.get("safe_approach_matched", False):
         if association.get("axial_distance_m") is not None:
             return None, "screwdriver axial/lateral/Z camera delta exceeds limit"
+        if association.get("horizontal_distance_m") is not None:
+            return None, "tape-measure XY/Z camera delta exceeds limit"
         return None, "camera delta exceeds %.0fmm" % (
             SAFE_APPROACH_ASSOCIATION_MAX_DISTANCE_M * 1000.0)
     target = association.get("target_base_xyz_m")

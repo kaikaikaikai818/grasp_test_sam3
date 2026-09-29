@@ -41,14 +41,36 @@ class TargetAssociationTests(unittest.TestCase):
         destination, _ = safe_approach_candidate(association)
         self.assertIsNone(destination)
 
-    def test_other_tools_keep_fifteen_millimetre_total_limit(self):
+    def test_tape_measure_allows_different_interior_case_points(self):
         association = associate_targets(
             [-0.081, -0.593, 0.049], [-0.061, -0.593, 0.049],
+            PASS_GATE, PASS_GATE, alignment_applied=True,
+            tool_category="tape measure", tool_axis_rad=0.0)
+        self.assertTrue(association["safe_approach_matched"], association)
+        destination, reason = safe_approach_candidate(association)
+        self.assertIsNotNone(destination, reason)
+
+    def test_tape_measure_keeps_case_and_height_limits(self):
+        association = associate_targets(
+            [-0.081, -0.593, 0.049], [-0.055, -0.593, 0.049],
             PASS_GATE, PASS_GATE, alignment_applied=True,
             tool_category="tape measure", tool_axis_rad=0.0)
         self.assertFalse(association["safe_approach_matched"])
         destination, _ = safe_approach_candidate(association)
         self.assertIsNone(destination)
+
+        association = associate_targets(
+            [-0.081, -0.593, 0.049], [-0.081, -0.593, 0.065],
+            PASS_GATE, PASS_GATE, alignment_applied=True,
+            tool_category="tape measure", tool_axis_rad=0.0)
+        self.assertFalse(association["safe_approach_matched"])
+
+    def test_other_tools_keep_fifteen_millimetre_total_limit(self):
+        association = associate_targets(
+            [-0.081, -0.593, 0.049], [-0.061, -0.593, 0.049],
+            PASS_GATE, PASS_GATE, alignment_applied=True,
+            tool_category="adjustable wrench", tool_axis_rad=0.0)
+        self.assertFalse(association["safe_approach_matched"])
 
 
 if __name__ == "__main__":
