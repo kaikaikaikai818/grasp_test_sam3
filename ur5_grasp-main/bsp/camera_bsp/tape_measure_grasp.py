@@ -30,7 +30,82 @@ def isolate_tape_measure_body(mask):
     body = labels == label
     if int(body.sum()) < 100:
         return None, "tape-measure body core is too small"
+    ys, xs = np.nonzero(body)
+    width = int(xs.max() - xs.min() + 1)
+    height = int(ys.max() - ys.min() + 1)
+    if max(width, height) / max(1, min(width, height)) > 2.0:
+        return None, "tape-measure candidate is strap-like, not case-like"
     return body, None
+
+
+def result_at_tape_measure_body(result, depth_raw, depth_scale,
+                                min_depth_m=0.15, max_depth_m=3.0):
+    """Convert one segmentation into a case-only tracking result.
+
+    This runs before temporal filtering so a high-score wrist strap cannot
+    become the tracked target.  The original mask is retained only for support
+    plane exclusion.
+    """
+    if result is None:
+        return None, "tape-measure detection is unavailable"
+    body, reason = isolate_tape_measure_body(result.get("mask"))
+    if body is None:
+        return None, reason
+    depth_m = np.asarray(depth_raw, dtype=np.float32) * float(depth_scale)
+    if depth_m.shape != body.shape:
+        return None, "tape-measure mask/depth dimensions differ"
+    valid = (body & np.isfinite(depth_m)
+             & (depth_m >= float(min_depth_m))
+             & (depth_m <= float(max_depth_m)))
+    values = depth_m[valid]
+    if values.size < 15:
+        return None, "insufficient depth on tape-measure case"
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    valid &= np.abs(depth_m - median) <= max(0.03, 3.0 * 1.4826 * mad)
+    pixels = np.argwhere(valid)
+    if pixels.shape[0] < 15:
+        return None, "insufficient consistent depth on tape-measure case"
+    v, u = np.median(pixels, axis=0).astype(int)
+    ys, xs = np.nonzero(body)
+    box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    contours, _ = cv2.findContours(
+        body.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    angle = 0.0
+    if contours:
+        (_, _), (width, height), raw_angle = cv2.minAreaRect(
+            max(contours, key=cv2.contourArea))
+        angle = float(raw_angle + (90.0 if width < height else 0.0)) % 180.0
+    body_result = dict(result)
+    body_result.update({
+        "source_mask": np.asarray(result["mask"], dtype=bool),
+        "mask": body,
+        "center": (int(u), int(v)),
+        "z_mm": median * 1000.0,
+        "box": box,
+        "area": float(body.sum()),
+        "angle_deg": angle,
+        "valid_depth_points": int(np.count_nonzero(valid)),
+    })
+    return body_result, None
+
+
+def select_tape_measure_body_result(results, depth_raw, depth_scale):
+    """Choose the best case-like result and reject strap-only segmentations."""
+    valid = []
+    reasons = []
+    for result in results or ():
+        body_result, reason = result_at_tape_measure_body(
+            result, depth_raw, depth_scale)
+        if body_result is not None:
+            valid.append(body_result)
+        elif reason:
+            reasons.append(reason)
+    if not valid:
+        return None, (reasons[0] if reasons
+                      else "no tape-measure case candidate")
+    return max(valid, key=lambda item: (float(item.get("score", 0.0)),
+                                        float(item.get("area", 0.0)))), None
 
 
 def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,

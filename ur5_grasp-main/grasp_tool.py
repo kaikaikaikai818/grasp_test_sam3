@@ -49,7 +49,8 @@ from bsp.camera_bsp.tool_names import known_category, normalize_prompt
 from bsp.camera_bsp.tool_grasp_candidates import propose_grasp_region
 from bsp.camera_bsp.tool_profiles import UNIVERSAL_OPEN_POSITION, load_tool_profile
 from bsp.camera_bsp.tape_measure_grasp import (isolate_tape_measure_body,
-                                                plan_tape_measure_grasp)
+                                                plan_tape_measure_grasp,
+                                                select_tape_measure_body_result)
 from bsp.camera_bsp.planar_orientation import (axial_difference_deg,
                                                 overhead_orientation,
                                                 principal_axis_base)
@@ -435,7 +436,14 @@ def main():
                 ho_coord = "D455 detection paused after P"
                 ho_disp = ho_color.copy()
             else:
-                raw_ho = detector.detect_roi(ho_color, ho_depth, ho_cam.scale, D455_ROI)
+                if tool_category == "tape measure":
+                    raw_ho, _ = select_tape_measure_body_result(
+                        detector.detect_all_roi(
+                            ho_color, ho_depth, ho_cam.scale, D455_ROI),
+                        ho_depth, ho_cam.scale)
+                else:
+                    raw_ho = detector.detect_roi(
+                        ho_color, ho_depth, ho_cam.scale, D455_ROI)
                 res_ho, ho_status = ho_filter.update(raw_ho)
                 ho_handle = None
                 ho_handle_reason = None
@@ -496,7 +504,14 @@ def main():
             hi_gate = gate_detection(
                 None, hi_status, "D435I", tool_category=tool_category)
             if hi_color is not None:
-                raw_hi = detector.detect(hi_color, hi_depth, robot.camera.scale)
+                if tool_category == "tape measure":
+                    raw_hi, _ = select_tape_measure_body_result(
+                        detector.detect_all(
+                            hi_color, hi_depth, robot.camera.scale),
+                        hi_depth, robot.camera.scale)
+                else:
+                    raw_hi = detector.detect(
+                        hi_color, hi_depth, robot.camera.scale)
                 res_hi, hi_status = hi_filter.update(raw_hi)
                 if (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_hi is not None
                         and hi_status == "STABLE"):
@@ -566,7 +581,8 @@ def main():
                             if tool_category is not None:
                                 current_support_plane, support_plane_reason = fit_horizontal_support_plane(
                                     hi_depth, robot.camera.scale, hi_pixel_to_base,
-                                    exclude_mask=res_hi.get("mask"))
+                                    exclude_mask=res_hi.get(
+                                        "source_mask", res_hi.get("mask")))
                             coord_name = "HI base"
                         except Exception:
                             x, y, z = hi_camera
