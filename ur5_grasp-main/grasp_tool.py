@@ -140,6 +140,10 @@ SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
 SCREWDRIVER_R_START_TOL_M = 0.015
 SUPPORT_PLANE_SHIFT_MAX_M = 0.008
 MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.005
+# Metre-valued decimal subtraction can turn an exact 3.0 mm boundary into
+# 2.999999999999999 mm.  This tolerance is only for numeric comparison and is
+# one thousandth of a millimetre; it does not lower the physical limit.
+CLEARANCE_COMPARISON_EPSILON_M = 1e-6
 # The projected mask slightly overestimates this screwdriver's handle diameter.
 # Lower the TCP by 3 mm from the nominal cylinder midpoint while retaining the
 # independent 5 mm support-plane clearance gate below.
@@ -1190,6 +1194,14 @@ def point_in_workspace(point):
                for value, (low, high) in zip(point, WORKSPACE_LIMITS))
 
 
+def clearance_meets_minimum(clearance_m, minimum_m):
+    """Compare a planned plane clearance without rejecting an equal boundary."""
+    values = np.asarray([clearance_m, minimum_m], dtype=np.float64)
+    return bool(np.all(np.isfinite(values))
+                and float(clearance_m) + CLEARANCE_COMPARISON_EPSILON_M
+                >= float(minimum_m))
+
+
 def safe_approach_candidate(association):
     """Build a no-descent observation pose only after strict dual-camera agreement.
 
@@ -1919,7 +1931,7 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
                          if grip_profile is None else float(grip_profile.get(
                              "minimum_clearance_m",
                              MIN_GRASP_TCP_PLANE_CLEARANCE_M)))
-    if plane_clearance < minimum_clearance:
+    if not clearance_meets_minimum(plane_clearance, minimum_clearance):
         print("[安全中止] 夹持TCP离支撑面仅 %.1fmm（至少需要 %.1fmm），拒绝执行。" %
               (plane_clearance * 1000.0,
                minimum_clearance * 1000.0))

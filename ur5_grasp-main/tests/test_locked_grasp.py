@@ -9,11 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import grasp_tool
 from grasp_tool import (POST_GRASP_LIFT_SPEED, SAFE_APPROACH_SPEED,
                         SAFE_DESCENT_SPEED, SAFE_DESCENT_TRANSIT_SPEED,
-                        SCREWDRIVER_GRASP_SPEED, grasp_preview_status_text,
+                        SCREWDRIVER_GRASP_SPEED, clearance_meets_minimum,
+                        grasp_preview_status_text,
                         trusted_target_shift_m)
 
 
 class LockedGraspTests(unittest.TestCase):
+    def test_exact_three_mm_clearance_survives_float_subtraction(self):
+        clearance = 0.0244 - 0.0214
+        self.assertTrue(clearance_meets_minimum(clearance, 0.003))
+        self.assertFalse(clearance_meets_minimum(0.0029, 0.003))
+
     def test_occluded_low_view_does_not_replace_locked_target(self):
         shift = trusted_target_shift_m(
             [0.0, -0.6, 0.05], None,
