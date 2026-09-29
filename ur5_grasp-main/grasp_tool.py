@@ -219,7 +219,8 @@ TAPE_MEASURE_TEST_TORQUE_MIN = 80
 # 5mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
 TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
-PLIERS_TEST_GRIP_FORCE = 20
+PLIERS_TEST_GRIP_FORCE = 25
+PLIERS_TEST_LIFT_SPEED = 0.05
 # At force=20 the controller's observed torque ceiling is 80.  The strict
 # two-signal check uses ``current > minimum``, so 80 would be impossible to
 # accept with a minimum of 80 even when the controller reports reached=1.
@@ -288,6 +289,7 @@ def main():
             "torque_min": PLIERS_TEST_TORQUE_MIN,
             "contact_mode": "both",
             "minimum_clearance_m": PLIERS_MIN_GRASP_TCP_PLANE_CLEARANCE_M,
+            "lift_speed": PLIERS_TEST_LIFT_SPEED,
             "requires_angle": True,
         }
     profile_required = (
@@ -1918,6 +1920,9 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
                       else grip_profile["close_position"])
     grip_force = (SCREWDRIVER_GRASP_FORCE if grip_profile is None
                   else grip_profile["grip_force"])
+    lift_speed = (POST_GRASP_LIFT_SPEED if grip_profile is None
+                  else float(grip_profile.get("lift_speed",
+                                              POST_GRASP_LIFT_SPEED)))
     torque_min = (GRIP_TORQUE_MIN if grip_profile is None
                   else grip_profile["torque_min"])
     # The built-in screwdriver path previously accepted torque alone.  Field
@@ -1993,8 +1998,8 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
             print("[安全中止] %.0fmm 测试抬升点超出工作空间；不抬升。"
                   % (SCREWDRIVER_TEST_LIFT_M * 1000.0))
             return False
-        robot.moveL(lift.tolist() + list(orientation), speed=POST_GRASP_LIFT_SPEED,
-                    acceleration=POST_GRASP_LIFT_SPEED)
+        robot.moveL(lift.tolist() + list(orientation), speed=lift_speed,
+                    acceleration=lift_speed)
         print("[%s抓取完成] reached=%s torque=%s command_position=%s；"
               "已低力夹持并抬升 %.0fmm，停在抬升位置。"
               % (tool_label, torque_reached, torque_current, closed_position,

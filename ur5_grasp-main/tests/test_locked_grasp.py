@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import grasp_tool
 from grasp_tool import (POST_GRASP_LIFT_SPEED, SAFE_APPROACH_SPEED,
                         SAFE_DESCENT_SPEED, SAFE_DESCENT_TRANSIT_SPEED,
+                        PLIERS_TEST_GRIP_FORCE, PLIERS_TEST_LIFT_SPEED,
                         SCREWDRIVER_GRASP_SPEED, clearance_meets_minimum,
                         grasp_preview_status_text,
                         trusted_target_shift_m)
@@ -45,6 +46,11 @@ class LockedGraspTests(unittest.TestCase):
         self.assertGreater(SAFE_DESCENT_TRANSIT_SPEED, SAFE_DESCENT_SPEED)
         self.assertGreater(SAFE_DESCENT_SPEED, SCREWDRIVER_GRASP_SPEED)
         self.assertLessEqual(POST_GRASP_LIFT_SPEED, SAFE_DESCENT_TRANSIT_SPEED)
+
+    def test_pliers_uses_firmer_grip_and_slower_trial_lift(self):
+        self.assertEqual(PLIERS_TEST_GRIP_FORCE, 25)
+        self.assertEqual(PLIERS_TEST_LIFT_SPEED, 0.05)
+        self.assertLess(PLIERS_TEST_LIFT_SPEED, POST_GRASP_LIFT_SPEED)
 
     def test_descent_has_no_physical_100mm_pregrasp_stop(self):
         class FakeRobot:
