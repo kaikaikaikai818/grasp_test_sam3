@@ -30,6 +30,14 @@ class ReadOnlyRobotState:
             raise ValueError("机械臂返回了无效TCP位姿: %s" % pose)
         return pose
 
+    def get_actual_tcp_force(self):
+        if self.interface is None or not hasattr(self.interface, "getActualTCPForce"):
+            raise RuntimeError("机械臂六维力只读接口未连接。")
+        wrench = np.asarray(self.interface.getActualTCPForce(), dtype=np.float64).reshape(-1)
+        if wrench.size != 6 or not np.all(np.isfinite(wrench)):
+            raise ValueError("机械臂返回了无效六维力: %s" % wrench)
+        return wrench
+
     def close(self):
         disconnect = getattr(self.interface, "disconnect", None)
         if callable(disconnect):

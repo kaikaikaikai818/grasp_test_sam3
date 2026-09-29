@@ -15,6 +15,7 @@ class MainLauncherTests(unittest.TestCase):
     def test_resolves_chinese_name_and_number(self):
         self.assertEqual(MODULE.resolve_tool("螺丝刀").prompt, "screwdriver")
         self.assertEqual(MODULE.resolve_tool("2").prompt, "tape measure")
+        self.assertEqual(MODULE.resolve_tool("钳子").prompt, "pliers")
 
     def test_screwdriver_uses_automatic_validated_flow(self):
         command = MODULE.build_core_command(MODULE.resolve_tool("1"), python="python")

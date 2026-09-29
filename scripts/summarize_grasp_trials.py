@@ -5,7 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 
 TOOLS = ("screwdriver", "adjustable wrench", "tape measure",
-         "tape dispenser", "rubber mallet")
+         "pliers", "tape dispenser")
 
 
 def summarize(path: Path):

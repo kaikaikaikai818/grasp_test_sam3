@@ -1,0 +1,24 @@
+{
+  "approved_for_this_cell": false,
+  "handover_xyz_m": [null, null, null],
+  "travel_tcp_z_m": null,
+  "pull_direction_base_xy": [null, null],
+  "pull_threshold_n": null,
+  "max_lateral_force_n": null,
+  "pull_sustain_s": 0.25,
+  "baseline_duration_s": 1.0,
+  "handover_timeout_s": 20.0,
+  "retreat_distance_m": 0.08,
+  "force_calibration": {
+    "light_touch_peak_n": [null, null, null],
+    "normal_take_peak_n": [null, null, null],
+    "normal_take_duration_s": [null, null, null]
+  },
+  "tools": {
+    "screwdriver": {"approved": false, "orientation_rvec": [null, null, null], "safe_human_grip": "handle end"},
+    "tape measure": {"approved": false, "orientation_rvec": [null, null, null], "safe_human_grip": "exposed case side"},
+    "adjustable wrench": {"approved": false, "orientation_rvec": [null, null, null], "safe_human_grip": "handle end"},
+    "pliers": {"approved": false, "orientation_rvec": [null, null, null], "safe_human_grip": "handle ends"},
+    "tape dispenser": {"approved": false, "orientation_rvec": [null, null, null], "safe_human_grip": "body away from cutter"}
+  }
+}

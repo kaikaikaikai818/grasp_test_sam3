@@ -5,7 +5,7 @@ PROMPTS = {
     "adjustable wrench": "an adjustable wrench",
     "tape measure": "a tape measure",
     "tape dispenser": "a tape dispenser",
-    "rubber mallet": "a rubber mallet",
+    "pliers": "pliers",
 }
 
 

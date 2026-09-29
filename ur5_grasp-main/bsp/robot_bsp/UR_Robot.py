@@ -39,6 +39,9 @@ def load_camera_ini(path):
 
 
 lock = threading.Lock()
+MOTION_POLL_INTERVAL_S = 0.02
+MOTION_STABLE_SAMPLES = 3
+MOTION_VERIFY_TIMEOUT_S = 3.0
 
 # 夹爪 Modbus 寄存器地址（与 bsp/grasp_bsp/grasp_claw.py 一致）
 POSITION_HIGH_8 = 0x0102
@@ -138,19 +141,43 @@ class UR_Robot:
 # Define the robot control class
     def moveL(self, target_pose, speed=0.05, acceleration=0.05):
         self.rtde_c.moveL(target_pose, speed, acceleration)
-        actual_tool_positions = self.get_actual_tcp_pose()
-        while not all([np.abs(actual_tool_positions[j] - target_pose[j]) < self.tool_pose_tolerance[j] for j in range(3)]):
-            actual_tool_positions = self.get_actual_tcp_pose()
-            time.sleep(0.01)
-        time.sleep(1.5)  
+        self._wait_for_stable_target(
+            self.get_actual_tcp_pose, target_pose, self.tool_pose_tolerance,
+            "TCP")
 
     def moveJ(self, target_joint, speed=0.05, acceleration=0.05):
         self.rtde_c.moveJ(target_joint, speed, acceleration)
-        actual_joint_positions = self.get_actual_joint_position()
-        while not all([np.abs(actual_joint_positions[j] - target_joint[j]) < self.joint_tolerance[j] for j in range(len(target_joint))]):
-            actual_joint_positions = self.get_actual_joint_position()
-            time.sleep(0.01)
-        time.sleep(1.5)
+        self._wait_for_stable_target(
+            self.get_actual_joint_position, target_joint, self.joint_tolerance,
+            "joint")
+
+    def _wait_for_stable_target(self, read_actual, target, tolerance, label):
+        """Return after several consecutive in-tolerance samples, without a fixed dwell."""
+        target = np.asarray(target, dtype=np.float64)
+        tolerance = np.asarray(tolerance, dtype=np.float64)
+        deadline = time.monotonic() + MOTION_VERIFY_TIMEOUT_S
+        stable = 0
+        while time.monotonic() <= deadline:
+            actual = np.asarray(read_actual(), dtype=np.float64)
+            in_tolerance = (actual.shape == target.shape
+                            and np.all(np.isfinite(actual)))
+            if in_tolerance and label == "TCP" and target.size == 6:
+                translation_ok = np.all(np.abs(actual[:3] - target[:3]) <= tolerance[:3])
+                relative = (_rotation_vector_to_matrix(actual[3:]).T
+                            @ _rotation_vector_to_matrix(target[3:]))
+                cosine = np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0)
+                rotation_ok = math.acos(float(cosine)) <= float(np.max(tolerance[3:]))
+                in_tolerance = bool(translation_ok and rotation_ok)
+            elif in_tolerance:
+                in_tolerance = bool(np.all(np.abs(actual - target) <= tolerance))
+            if in_tolerance:
+                stable += 1
+                if stable >= MOTION_STABLE_SAMPLES:
+                    return
+            else:
+                stable = 0
+            time.sleep(MOTION_POLL_INTERVAL_S)
+        raise RuntimeError("%s motion did not stabilize before timeout" % label)
 
     def go_home(self):
         self.moveJ(self.home_joint_config)
@@ -163,6 +190,15 @@ class UR_Robot:
 
     def get_robot_status(self):
         return self.rtde_r.getRobotStatus()
+
+    def get_actual_tcp_force(self):
+        """Return UR base-frame TCP wrench [Fx,Fy,Fz,Tx,Ty,Tz]."""
+        if self.rtde_r is None or not hasattr(self.rtde_r, "getActualTCPForce"):
+            raise RuntimeError("UR TCP force feedback is unavailable")
+        wrench = np.asarray(self.rtde_r.getActualTCPForce(), dtype=np.float64).reshape(-1)
+        if wrench.size != 6 or not np.all(np.isfinite(wrench)):
+            raise RuntimeError("UR returned an invalid TCP force vector")
+        return wrench.tolist()
 
     # -------------------------- 夹爪（Modbus RTU） --------------------------
     def init_gripper(self):

@@ -24,7 +24,7 @@ class CandidateTests(unittest.TestCase):
         mask[20:80, 20:80] = True
         candidate, reason = propose_grasp_region(
             mask, np.full(mask.shape, 1000, np.uint16), .001,
-            "rubber mallet")
+            "tape dispenser")
         self.assertIsNone(candidate)
         self.assertIn("direction", reason)
 
@@ -47,6 +47,15 @@ class CandidateTests(unittest.TestCase):
             "tape measure")
         self.assertIsNone(candidate)
         self.assertIn("body area", reason)
+
+    def test_pliers_candidate_uses_narrow_handle_band(self):
+        mask = np.zeros((120, 180), dtype=bool)
+        mask[35:85, 15:50] = True
+        mask[55:65, 48:165] = True
+        candidate, reason = propose_grasp_region(
+            mask, np.full(mask.shape, 700, np.uint16), .001, "pliers")
+        self.assertIsNone(reason)
+        self.assertGreater(candidate.center_px[0], 70)
 
 
 if __name__ == "__main__":

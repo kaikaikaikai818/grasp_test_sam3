@@ -6,3 +6,4 @@ __py
 .venv/
 outputs/
 ur5_grasp-main/camera_alignment.json
+ur5_grasp-main/handover.json

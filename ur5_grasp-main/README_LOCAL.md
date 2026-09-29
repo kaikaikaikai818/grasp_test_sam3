@@ -4,7 +4,7 @@
 
 ## 2026 秋季阶段目标与当前可用范围
 
-阶段验收与国庆假期后的安排见 `PROJECT_ROADMAP_5_WEEKS.md`，最终日期为 2026-11-06。英文名称可在启动时传入，例如 `--prompt "screwdriver"`、`--prompt "adjustable wrench"`、`--prompt "tape measure"`、`--prompt "tape dispenser"` 或 `--prompt "rubber mallet"`；未配置过的英文名称也可以用于视觉识别。多工具同场时，模型按指定名称选择目标，但正确率仍须实测。
+阶段验收与后续安排见 `PROJECT_ROADMAP_5_WEEKS.md`。五类正式工具是螺丝刀、卷尺、活动扳手、钳子和胶带切割器；英文名称可在启动时传入，例如 `--prompt "screwdriver"`、`--prompt "tape measure"`、`--prompt "adjustable wrench"`、`--prompt "pliers"` 或 `--prompt "tape dispenser"`。未配置过的英文名称也可以用于纯视觉识别。多工具同场时，模型按指定名称选择目标，但正确率仍须实测。
 
 程序默认 `--stage vision`，不连接机械臂控制或夹爪。按以下顺序逐级验证，每次只开放本级能力：
 
@@ -17,7 +17,7 @@
 
 在 `grasp` 阶段确认抓取成功后可按 `t`。抓取流程已抬升 50 mm，程序保持当前 XY，再垂直抬升 10 mm，使总抬升量达到 60 mm，然后原地恢复标准姿态 `[3.141, 0, 0]`。尚未确认抓取成功、已经松爪或处于其他阶段时，`t` 会被拒绝。持物旋转前仍需确认工具扫掠范围无人、无障碍物。
 
-当前已验证的抓取基线仍是螺丝刀。其他四类先只输出**视觉候选点**；进入 `rotate` 及后续阶段前，必须实机测量夹持高度、夹爪位置与力度，将 `tool_profiles.example.json` 复制为本机 `tool_profiles.json` 并审核启用。
+螺丝刀已完成大、小两把的实机验证并冻结参数。卷尺处于最终回归阶段；活动扳手、钳子和胶带切割器先只输出**视觉候选点**。新类别进入 `rotate` 及后续阶段前，必须实机测量夹持高度、夹爪位置与力度，将 `tool_profiles.example.json` 复制为本机 `tool_profiles.json` 并审核启用。
 
 现有 CLIPSeg + MobileSAM 是默认视觉方案。可选 YOLOE 使用 `--backend yoloe --checkpoint <本地模型文件>`；需另行安装 `requirements-yoloe.txt`，预先下载动态文本编码器及权重。运行时更换英文名称需要保留原始可提示模型；类别固化的导出文件不能满足这一要求。用 `scripts/evaluate_tool_vision.py --help` 查看离线对比工具，它只读取图片并保存预测与覆盖图，不连接机器人。
 
@@ -91,7 +91,7 @@ outputs/validation/measurements_年月日_时分秒.jsonl
 ## 双相机目标关联预演
 
 `ENABLE_ROBOT_STATE_READ = True` 通过独立的 `read_only_robot_state.py` 建立
-RTDE 状态接收连接，只读取当前 TCP 位姿。厂家提供的 `UR_Robot.py` 保持原样；
+RTDE 状态接收连接，只读取当前 TCP 位姿和需要诊断时的末端六维力；
 程序不会创建 `RTDEControlInterface`，`ENABLE_ROBOT_GRASP = False` 仍然锁定
 所有机械臂运动和夹爪操作。
 
@@ -157,3 +157,11 @@ D435i 必须连续 3 帧重新看到螺丝刀，抓取预览中心应位于手�
 只有相机支架移动、末端相机重装、TCP 改变、分辨率改变、核心标定文件改变，或
 运行时双相机误差持续超过 15 mm，才需要重新验证。换工具、换文字指令和移动工具
 都不需要生成新的 `camera_alignment.json`。
+
+## 固定交接递送
+
+固定交接代码已接入抓取核心，但默认关闭，也没有加入日常 `run.bat`。只有五类工具全部完成抓取验收后，才复制 `handover.example.json` 为本机 `handover.json`，现场填写并审核安全通行高度、交接 TCP、朝人的水平拉取方向，以及每类工具的展示姿态。总开关和对应工具的 `approved` 必须同时为 `true`，否则程序会在运动前拒绝递送。
+
+递送顺序为：持物垂直抬升、在安全高度移动、低速进入固定交接点、完全停止并采集末端六维力基线。只有朝标定方向的拉力持续超过现场阈值才张开夹爪；轻触、侧向碰撞、超时或力反馈异常都会保持夹紧并原地等待人工处理。阈值须由现场三次轻拉和三次正常取走数据确定，不能直接照抄示例值，也不能用夹爪电流代替末端力。
+
+机械臂运动完成后的固定 1.5 秒等待已改为“实际位姿连续稳定后立即继续”，保留连续采样确认与超时中止。移动底座尚未接入，因为当前仓库没有底座的控制接口、停靠状态或急停协议；完成五类工具和固定交接验收后再接入该硬件适配层。

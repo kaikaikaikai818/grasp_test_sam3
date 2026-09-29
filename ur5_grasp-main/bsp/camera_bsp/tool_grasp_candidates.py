@@ -25,7 +25,7 @@ def propose_grasp_region(mask, depth_raw, depth_scale, tool):
     if binary.ndim != 2 or binary.shape != depth.shape or binary.sum() < 100:
         return None, "invalid or too small tool mask"
     if tool not in ("adjustable wrench", "tape measure", "tape dispenser",
-                    "rubber mallet"):
+                    "pliers"):
         return None, "no visual grasp strategy for this tool"
     distances = cv2.distanceTransform(binary.astype(np.uint8), cv2.DIST_L2, 5)
     if tool == "tape measure":

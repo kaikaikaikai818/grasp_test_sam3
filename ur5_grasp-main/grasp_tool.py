@@ -36,6 +36,8 @@ from bsp.robot_bsp.UR_Robot import UR_Robot, load_camera_ini
 from bsp.robot_bsp.read_only_robot_state import ReadOnlyRobotState
 from bsp.robot_bsp.fixed_placement import (load_placement, place_at_fixed_point,
                                            plan_safe_orientation_return)
+from bsp.robot_bsp.tool_handover import (execute_fixed_handover,
+                                          load_handover_config)
 from bsp.camera_bsp.realsenseD415 import Camera
 from bsp.camera_bsp.hand_out_eye_calibration import HandOutEyeCalibration
 from bsp.camera_bsp.sam_tool_detect import SamToolDetector, TemporalResultFilter
@@ -214,11 +216,15 @@ def main():
     ENABLE_SCREWDRIVER_GRASP = args.stage in ("grasp", "place")
     ENABLE_ONE_KEY_GRASP = bool(args.auto and args.stage in ("grasp", "place"))
     angle_capable = tool_category in (
-        "screwdriver", "adjustable wrench", "tape measure", "rubber mallet",
+        "screwdriver", "adjustable wrench", "tape measure", "pliers",
         "tape dispenser")
     args.enable_angle_rotation = (
         args.stage in ("rotate", "descent", "grasp", "place") and angle_capable)
     args.place_after_grasp = args.stage == "place"
+    if args.place_after_grasp and args.handover_after_grasp:
+        raise ValueError("fixed placement and human handover are mutually exclusive")
+    if args.handover_after_grasp and args.stage != "grasp":
+        raise ValueError("human handover requires --stage grasp")
     args.vision_only = args.stage == "vision"
     profile = None
     if args.tape_grasp_test:
@@ -251,6 +257,9 @@ def main():
         raise ValueError("fixed placement requires an enabled grasp path")
     placement = (load_placement(args.place_config, WORKSPACE_LIMITS)
                  if args.place_after_grasp else None)
+    handover = (load_handover_config(
+        args.handover_config, tool_category, WORKSPACE_LIMITS)
+        if args.handover_after_grasp else None)
     if ENABLE_ROBOT_GRASP and ENABLE_SAFE_APPROACH_TEST:
         raise RuntimeError("ENABLE_ROBOT_GRASP 与 ENABLE_SAFE_APPROACH_TEST 不能同时开启")
     if ENABLE_SAFE_DESCENT_TEST and not ENABLE_SAFE_APPROACH_TEST:
@@ -529,7 +538,7 @@ def main():
                                 return base_point_m(robot.camera_to_base(
                                     point_camera_mm, tcp_pose=tcp_pose))
                             if (args.enable_angle_rotation or args.show_angle) and tool_category in (
-                                    "screwdriver", "adjustable wrench", "rubber mallet",
+                                    "screwdriver", "adjustable wrench", "pliers",
                                     "tape dispenser", "tape measure"):
                                 orientation_mask = res_hi["mask"]
                                 minimum_axis_ratio = 2.0
@@ -680,16 +689,26 @@ def main():
                     if status == "done":
                         grasp_completed = True
                         orientation_return_completed = False
-                        if placement is not None:
+                        if placement is not None or handover is not None:
                             try:
-                                place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
-                                                     (profile["open_position"] if profile else GRIP_OPEN_POS),
-                                                     GRIP_OPEN_SPEED,
-                                                     GRIP_OPEN_FORCE)
-                                print("[一键抓取] 已在固定位置放下工具。")
-                                grasp_completed = False
+                                if handover is not None:
+                                    delivered, reason = execute_fixed_handover(
+                                        robot, handover, WORKSPACE_LIMITS,
+                                        (profile["open_position"] if profile else GRIP_OPEN_POS))
+                                    if not delivered:
+                                        print("[交接中止] %s；机器人保持静止和闭爪。" % reason)
+                                    else:
+                                        print("[固定交接] 已检测到朝人方向拉取，完成松爪和退出。")
+                                        grasp_completed = False
+                                else:
+                                    place_at_fixed_point(
+                                        robot, placement, WORKSPACE_LIMITS,
+                                        (profile["open_position"] if profile else GRIP_OPEN_POS),
+                                        GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+                                    print("[一键抓取] 已在固定位置放下工具。")
+                                    grasp_completed = False
                             except Exception as exc:
-                                print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
+                                print("[递送中止] %s；请检查机械臂和工具状态。" % exc)
                         else:
                             print("[一键抓取] 已夹起并停住。按 o 可松开。")
                         auto_grasp_state = "idle"
@@ -888,16 +907,26 @@ def main():
                     if status == "done":
                         grasp_completed = True
                         orientation_return_completed = False
-                    if status == "done" and placement is not None:
+                    if status == "done" and (placement is not None or handover is not None):
                         try:
-                            place_at_fixed_point(robot, placement, WORKSPACE_LIMITS,
-                                                 (profile["open_position"] if profile else GRIP_OPEN_POS),
-                                                 GRIP_OPEN_SPEED,
-                                                 GRIP_OPEN_FORCE)
-                            print("[固定放置] 完成。")
-                            grasp_completed = False
+                            if handover is not None:
+                                delivered, reason = execute_fixed_handover(
+                                    robot, handover, WORKSPACE_LIMITS,
+                                    (profile["open_position"] if profile else GRIP_OPEN_POS))
+                                if not delivered:
+                                    print("[交接中止] %s；机器人保持静止和闭爪。" % reason)
+                                else:
+                                    print("[固定交接] 完成。")
+                                    grasp_completed = False
+                            else:
+                                place_at_fixed_point(
+                                    robot, placement, WORKSPACE_LIMITS,
+                                    (profile["open_position"] if profile else GRIP_OPEN_POS),
+                                    GRIP_OPEN_SPEED, GRIP_OPEN_FORCE)
+                                print("[固定放置] 完成。")
+                                grasp_completed = False
                         except Exception as exc:
-                            print("[放置中止] %s；请检查机械臂和工具状态。" % exc)
+                            print("[递送中止] %s；请检查机械臂和工具状态。" % exc)
             elif key == ord('y'):
                 if not args.enable_angle_rotation or not observation_active:
                     print("[安全锁定] 使用 --stage rotate 或后续阶段并先到达观察点。")
@@ -909,8 +938,8 @@ def main():
                         "screwdriver": "螺丝刀",
                         "tape measure": "卷尺壳体",
                         "adjustable wrench": "活动扳手",
+                        "pliers": "钳子",
                         "tape dispenser": "胶带切割器",
-                        "rubber mallet": "锤子",
                     }.get(tool_category, "工具")
                     print("[安全锁定] %s方向尚未连续稳定。" % direction_label)
                 elif not grasp_preview.get("ready"):
@@ -1945,6 +1974,11 @@ def parse_args():
     p.add_argument("--place-config", type=Path,
                    default=SCRIPT_ROOT / "fixed_placement.json",
                    help="approved fixed-placement coordinates for this cell")
+    p.add_argument("--handover-after-grasp", action="store_true",
+                   help="after a confirmed grasp, use approved pull-to-release handover")
+    p.add_argument("--handover-config", type=Path,
+                   default=SCRIPT_ROOT / "handover.json",
+                   help="approved fixed handover zone and tool presentation poses")
     p.add_argument("--gripper-test", action="store_true",
                    help="仅测试夹爪：交互式发送 position 并回显，用于定开/合值")
     p.add_argument("--tape-grasp-test", action="store_true",
