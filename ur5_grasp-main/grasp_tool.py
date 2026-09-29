@@ -219,7 +219,7 @@ TAPE_MEASURE_TEST_TORQUE_MIN = 80
 # 5mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
 TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
-PLIERS_TEST_GRIP_FORCE = 25
+PLIERS_TEST_GRIP_FORCE = 30
 PLIERS_TEST_LIFT_SPEED = 0.05
 # At force=20 the controller's observed torque ceiling is 80.  The strict
 # two-signal check uses ``current > minimum``, so 80 would be impossible to

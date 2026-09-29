@@ -48,7 +48,7 @@ class LockedGraspTests(unittest.TestCase):
         self.assertLessEqual(POST_GRASP_LIFT_SPEED, SAFE_DESCENT_TRANSIT_SPEED)
 
     def test_pliers_uses_firmer_grip_and_slower_trial_lift(self):
-        self.assertEqual(PLIERS_TEST_GRIP_FORCE, 25)
+        self.assertEqual(PLIERS_TEST_GRIP_FORCE, 30)
         self.assertEqual(PLIERS_TEST_LIFT_SPEED, 0.05)
         self.assertLess(PLIERS_TEST_LIFT_SPEED, POST_GRASP_LIFT_SPEED)
 
