@@ -8,7 +8,7 @@ import numpy as np
 
 from .tool_names import PROMPTS
 
-UNIVERSAL_OPEN_POSITION = 4000
+UNIVERSAL_OPEN_POSITION = 3500
 
 
 def load_tool_profile(path: Path, category: str, workspace_limits):

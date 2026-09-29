@@ -29,7 +29,7 @@ class ProfileTests(unittest.TestCase):
                             encoding="utf-8")
             profile = load_tool_profile(path, "adjustable wrench", LIMITS)
             self.assertTrue(profile["requires_angle"])
-            self.assertEqual(profile["open_position"], 4000)
+            self.assertEqual(profile["open_position"], 3500)
             self.assertEqual(profile["close_position"], 11000)
 
     def test_legacy_per_tool_opening_is_replaced_by_universal_value(self):
@@ -41,7 +41,7 @@ class ProfileTests(unittest.TestCase):
             path.write_text(json.dumps({"tools": {"tape measure": data}}),
                             encoding="utf-8")
             profile = load_tool_profile(path, "tape measure", LIMITS)
-        self.assertEqual(profile["open_position"], 4000)
+        self.assertEqual(profile["open_position"], 3500)
 
 
 if __name__ == "__main__":

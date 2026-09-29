@@ -179,7 +179,7 @@ POST_GRASP_RETURN_LIFT_M = 0.010
 
 # 夹爪
 GRIP_PORT = "COM10"
-GRIP_OPEN_POS = UNIVERSAL_OPEN_POSITION  # 所有工具统一张开到 4000
+GRIP_OPEN_POS = UNIVERSAL_OPEN_POSITION  # 所有工具统一张开到 3500
 GRIP_CLOSE_POS = 11000        # 闭合（参考仓库值，可用 --gripper-test 校定）
 GRIP_SPEED = 50
 GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
