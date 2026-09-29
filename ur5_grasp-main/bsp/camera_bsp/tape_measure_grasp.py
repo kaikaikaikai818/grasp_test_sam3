@@ -113,7 +113,9 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
                             center_bias_m: float = 0.0,
                             minimum_clearance_m: float = 0.008,
                             minimum_thickness_m: float = 0.015,
-                            maximum_thickness_m: float = 0.100):
+                            maximum_thickness_m: float = 0.100,
+                            object_label: str = "tape-measure body",
+                            tool_category: str = "tape measure"):
     """Return a TCP height at the tape-measure body's vertical midpoint.
 
     ``body_top_z_m`` is the D435i base-frame depth at the interior body
@@ -126,15 +128,15 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
         minimum_clearance_m, minimum_thickness_m, maximum_thickness_m,
     ], dtype=np.float64)
     if not np.all(np.isfinite(values)):
-        return None, "non-finite tape-measure height or support plane"
+        return None, "non-finite %s height or support plane" % object_label
     if minimum_thickness_m <= 0 or maximum_thickness_m <= minimum_thickness_m:
-        return None, "invalid tape-measure thickness limits"
+        return None, "invalid %s thickness limits" % object_label
 
     thickness = float(body_top_z_m) - float(support_plane_z_m)
     if thickness < float(minimum_thickness_m):
-        return None, "tape-measure body thickness is implausibly small"
+        return None, "%s thickness is implausibly small" % object_label
     if thickness > float(maximum_thickness_m):
-        return None, "tape-measure body thickness is implausibly large"
+        return None, "%s thickness is implausibly large" % object_label
 
     body_mid_z = float(support_plane_z_m) + thickness / 2.0
     nominal_tcp_z = body_mid_z + float(gripper_offset_m)
@@ -142,7 +144,7 @@ def plan_tape_measure_grasp(body_top_z_m: float, support_plane_z_m: float,
     minimum_tcp_z = float(support_plane_z_m) + max(0.0, float(minimum_clearance_m))
     tcp_z = max(requested_tcp_z, minimum_tcp_z)
     return tcp_z, {
-        "tool_category": "tape measure",
+        "tool_category": tool_category,
         "body_top_z_m": float(body_top_z_m),
         "body_thickness_m": thickness,
         "body_mid_z_m": body_mid_z,

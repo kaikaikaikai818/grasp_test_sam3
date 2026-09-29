@@ -1263,15 +1263,18 @@ def build_grasp_preview(hi_base, hi_gate, observation_active,
             float(calibration["gripper_offset_m"]),
             center_bias_m=(TAPE_MEASURE_GRASP_CENTER_BIAS_M
                            if adaptive_body else PLIERS_GRASP_CENTER_BIAS_M),
-            minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M)
+            minimum_clearance_m=MIN_GRASP_TCP_PLANE_CLEARANCE_M,
+            minimum_thickness_m=(0.008 if adaptive_pliers else 0.015),
+            maximum_thickness_m=(0.060 if adaptive_pliers else 0.100),
+            object_label=("pliers handle" if adaptive_pliers
+                          else "tape-measure body"),
+            tool_category=("pliers" if adaptive_pliers else "tape measure"))
         if grasp_tcp_z is None:
             preview["reason"] = plan
             return preview
         plan["live_support_plane_z_m"] = float(support_plane.z_m)
         plan["support_plane_delta_m"] = float(support_plane.z_m - fixed_plane_z)
         plan["profile_grasp"] = profile is not None
-        if adaptive_pliers:
-            plan["tool_category"] = "pliers"
     elif profile is not None:
         if support_plane is None:
             preview["reason"] = "support plane unavailable for tool profile"

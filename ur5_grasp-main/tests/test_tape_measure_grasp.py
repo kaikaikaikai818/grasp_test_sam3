@@ -29,6 +29,18 @@ class TapeMeasureGeometryTests(unittest.TestCase):
         self.assertIsNone(tcp_z)
         self.assertIn("small", reason)
 
+    def test_thin_pliers_handle_uses_its_own_valid_range(self):
+        tcp_z, plan = plan_tape_measure_grasp(
+            0.0350, 0.0214,
+            minimum_thickness_m=0.008,
+            maximum_thickness_m=0.060,
+            object_label="pliers handle",
+            tool_category="pliers")
+        self.assertIsNotNone(tcp_z, plan)
+        self.assertEqual(plan["tool_category"], "pliers")
+        self.assertAlmostEqual(plan["body_thickness_m"], 0.0136, places=4)
+        self.assertGreaterEqual(tcp_z - 0.0214, 0.008)
+
     def test_implausibly_thick_body_is_rejected(self):
         tcp_z, reason = plan_tape_measure_grasp(0.1500, 0.0214)
         self.assertIsNone(tcp_z)
