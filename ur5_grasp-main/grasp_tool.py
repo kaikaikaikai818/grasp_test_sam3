@@ -111,6 +111,11 @@ SCREWDRIVER_ASSOCIATION_Z_MAX_M = 0.015
 # allow up to half a case width in XY while retaining the strict Z check.
 TAPE_MEASURE_ASSOCIATION_XY_MAX_M = 0.025
 TAPE_MEASURE_ASSOCIATION_Z_MAX_M = 0.015
+# D455 may resolve the pliers point nearer the pivot while D435i resolves the
+# intended handle midpoint.  Allow that difference only along the tool axis.
+PLIERS_ASSOCIATION_AXIAL_MAX_M = 0.030
+PLIERS_ASSOCIATION_LATERAL_MAX_M = 0.015
+PLIERS_ASSOCIATION_Z_MAX_M = 0.015
 SAFE_APPROACH_CONFIRM_FRAMES = 3
 SAFE_TRAVEL_Z_M = 0.25
 # 高位通行只在 z>=250mm 执行，可以比靠近工具时更快。近桌面的两段下降
@@ -479,16 +484,31 @@ def main():
                 else:
                     raw_ho = detector.detect_roi(
                         ho_color, ho_depth, ho_cam.scale, D455_ROI)
+                # Stabilize the semantic point between both handles.  Using
+                # the whole-object center makes a distant pliers mask jump
+                # toward the jaws whenever one handle is partially lost.
+                ho_prefilter_reason = None
+                if tool_category == "pliers" and raw_ho is not None:
+                    candidate, ho_prefilter_reason = propose_grasp_region(
+                        raw_ho["mask"], ho_depth, ho_cam.scale, tool_category)
+                    if candidate is None:
+                        raw_ho = None
+                    else:
+                        raw_ho = dict(raw_ho)
+                        raw_ho["center"] = candidate.center_px
+                        raw_ho["z_mm"] = candidate.depth_m * 1000.0
+                        ho_prefilter_reason = None
                 res_ho, ho_status = ho_filter.update(raw_ho)
                 ho_handle = None
-                ho_handle_reason = None
+                ho_handle_reason = ho_prefilter_reason
                 if (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_ho is not None
                         and ho_status == "STABLE"):
                     ho_handle, ho_handle_reason = find_screwdriver_handle(
                         res_ho, ho_depth, ho_cam.scale)
                     if ho_handle is not None:
                         res_ho = result_at_handle(res_ho, ho_handle)
-                elif tool_category is not None and res_ho is not None and ho_status == "STABLE":
+                elif (tool_category is not None and tool_category != "pliers"
+                      and res_ho is not None and ho_status == "STABLE"):
                     candidate, ho_handle_reason = propose_grasp_region(
                         res_ho["mask"], ho_depth, ho_cam.scale, tool_category)
                     if candidate is not None:
@@ -547,14 +567,27 @@ def main():
                 else:
                     raw_hi = detector.detect(
                         hi_color, hi_depth, robot.camera.scale)
+                hi_prefilter_reason = None
+                if tool_category == "pliers" and raw_hi is not None:
+                    candidate, hi_prefilter_reason = propose_grasp_region(
+                        raw_hi["mask"], hi_depth, robot.camera.scale, tool_category)
+                    if candidate is None:
+                        raw_hi = None
+                    else:
+                        raw_hi = dict(raw_hi)
+                        raw_hi["center"] = candidate.center_px
+                        raw_hi["z_mm"] = candidate.depth_m * 1000.0
+                        hi_prefilter_reason = None
                 res_hi, hi_status = hi_filter.update(raw_hi)
+                hi_handle_reason = hi_prefilter_reason
                 if (TEXT_PROMPT.strip().lower() == "a screwdriver" and res_hi is not None
                         and hi_status == "STABLE"):
                     hi_handle, hi_handle_reason = find_screwdriver_handle(
                         res_hi, hi_depth, robot.camera.scale)
                     if hi_handle is not None:
                         res_hi = result_at_handle(res_hi, hi_handle)
-                elif tool_category is not None and res_hi is not None and hi_status == "STABLE":
+                elif (tool_category is not None and tool_category != "pliers"
+                      and res_hi is not None and hi_status == "STABLE"):
                     candidate, hi_handle_reason = propose_grasp_region(
                         res_hi["mask"], hi_depth, robot.camera.scale, tool_category)
                     if candidate is not None:
@@ -1082,7 +1115,7 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         result["reason"] = "base coordinates disagree"
         return result
 
-    if tool_category == "screwdriver" and tool_axis_rad is not None:
+    if tool_category in ("screwdriver", "pliers") and tool_axis_rad is not None:
         axis = np.asarray([np.cos(float(tool_axis_rad)),
                            np.sin(float(tool_axis_rad))], dtype=np.float64)
         lateral_axis = np.asarray([-axis[1], axis[0]], dtype=np.float64)
@@ -1092,11 +1125,19 @@ def associate_targets(ho_base, hi_base, ho_gate, hi_gate, alignment_applied=Fals
         result["axial_distance_m"] = axial
         result["lateral_distance_m"] = lateral
         result["vertical_distance_m"] = vertical
+        if tool_category == "screwdriver":
+            axial_limit = SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M
+            lateral_limit = SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M
+            vertical_limit = SCREWDRIVER_ASSOCIATION_Z_MAX_M
+            result["association_mode"] = "screwdriver_axis"
+        else:
+            axial_limit = PLIERS_ASSOCIATION_AXIAL_MAX_M
+            lateral_limit = PLIERS_ASSOCIATION_LATERAL_MAX_M
+            vertical_limit = PLIERS_ASSOCIATION_Z_MAX_M
+            result["association_mode"] = "pliers_axis"
         result["safe_approach_matched"] = bool(
-            axial <= SCREWDRIVER_ASSOCIATION_AXIAL_MAX_M
-            and lateral <= SCREWDRIVER_ASSOCIATION_LATERAL_MAX_M
-            and vertical <= SCREWDRIVER_ASSOCIATION_Z_MAX_M)
-        result["association_mode"] = "screwdriver_axis"
+            axial <= axial_limit and lateral <= lateral_limit
+            and vertical <= vertical_limit)
     elif tool_category == "tape measure":
         horizontal = float(np.linalg.norm(delta[:2]))
         vertical = abs(float(delta[2]))
@@ -1169,7 +1210,9 @@ def safe_approach_candidate(association):
         return None, "two cameras do not identify one target"
     if not association.get("safe_approach_matched", False):
         if association.get("axial_distance_m") is not None:
-            return None, "screwdriver axial/lateral/Z camera delta exceeds limit"
+            label = ("pliers" if association.get("association_mode") == "pliers_axis"
+                     else "screwdriver")
+            return None, "%s axial/lateral/Z camera delta exceeds limit" % label
         if association.get("horizontal_distance_m") is not None:
             return None, "tape-measure XY/Z camera delta exceeds limit"
         return None, "camera delta exceeds %.0fmm" % (

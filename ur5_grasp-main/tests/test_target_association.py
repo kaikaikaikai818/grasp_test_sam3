@@ -65,6 +65,41 @@ class TargetAssociationTests(unittest.TestCase):
             tool_category="tape measure", tool_axis_rad=0.0)
         self.assertFalse(association["safe_approach_matched"])
 
+    def test_pliers_allows_handle_axis_point_difference(self):
+        axis = np.deg2rad(97.0)
+        direction = np.array([np.cos(axis), np.sin(axis)])
+        lateral = np.array([-direction[1], direction[0]])
+        ho = np.array([-0.075, -0.612, 0.029])
+        hi = ho.copy()
+        hi[:2] += direction * 0.013 + lateral * 0.006
+        hi[2] += 0.006
+
+        association = associate_targets(
+            ho, hi, PASS_GATE, PASS_GATE, alignment_applied=True,
+            tool_category="pliers", tool_axis_rad=axis)
+
+        self.assertTrue(association["safe_approach_matched"], association)
+        self.assertEqual(association["association_mode"], "pliers_axis")
+        destination, reason = safe_approach_candidate(association)
+        self.assertIsNotNone(destination, reason)
+
+    def test_pliers_keeps_cross_axis_and_height_limits_strict(self):
+        axis = np.deg2rad(97.0)
+        direction = np.array([np.cos(axis), np.sin(axis)])
+        lateral = np.array([-direction[1], direction[0]])
+        ho = np.array([-0.075, -0.612, 0.029])
+        for xy_delta, z_delta in ((lateral * 0.016, 0.0),
+                                  (direction * 0.010, 0.016)):
+            hi = ho.copy()
+            hi[:2] += xy_delta
+            hi[2] += z_delta
+            association = associate_targets(
+                ho, hi, PASS_GATE, PASS_GATE, alignment_applied=True,
+                tool_category="pliers", tool_axis_rad=axis)
+            self.assertFalse(association["safe_approach_matched"], association)
+            destination, _ = safe_approach_candidate(association)
+            self.assertIsNone(destination)
+
     def test_other_tools_keep_fifteen_millimetre_total_limit(self):
         association = associate_targets(
             [-0.081, -0.593, 0.049], [-0.061, -0.593, 0.049],
