@@ -74,6 +74,7 @@ def print_menu() -> None:
     for tool in TOOLS:
         print(f"{tool.key}. {tool.name:<8} [{labels[tool.status]}] {tool.note}")
     print("Q. 退出")
+    print("提示：工具阶段按 q 会返回本菜单；在本菜单输入 Q 才会完全退出。")
 
 
 def print_run_instructions(tool: ToolEntry) -> None:
@@ -81,7 +82,7 @@ def print_run_instructions(tool: ToolEntry) -> None:
     if tool.status == "operational":
         print("等待 D455 目标稳定并确认路径清空后，只需按一次小写 a。")
         print("之后程序自动完成高位观察、D435i 精定位、方向对齐、下降、")
-        print("低力夹持和 50 mm 试抬升。完成后按 o 松开，按 q 退出。")
+        print("低力夹持和 50 mm 试抬升。完成后按 o 松开，按 q 返回工具菜单。")
     elif tool.prompt == "pliers":
         print("钳子当前处于首次验收：按 P → Y → D，只检查手柄中段和40 mm间隙。")
         print("本次先不要按 R；确认抓取中心位于两条手柄中段之间后再继续。")
@@ -97,19 +98,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    if args.list:
-        print_menu()
-        return 0
-
-    value = args.tool
-    if value is None:
-        print_menu()
-        value = input("\n请选择工具: ").strip()
-    if value.lower() == "q":
-        return 0
-
+def run_selected_tool(value: str, runner=None) -> int:
+    """Validate one selection and run its isolated grasp process."""
     tool = resolve_tool(value)
     if tool is None:
         print("[错误] 无法识别该工具；请输入菜单编号或工具名称。")
@@ -122,7 +112,47 @@ def main() -> int:
         return 4
 
     print_run_instructions(tool)
-    return subprocess.run(build_core_command(tool), cwd=PROJECT_ROOT).returncode
+    if runner is None:
+        runner = subprocess.run
+    return runner(build_core_command(tool), cwd=PROJECT_ROOT).returncode
+
+
+def interactive_menu(input_fn=None, runner=None) -> int:
+    """Keep the launcher alive while each tool runs in a clean subprocess."""
+    if input_fn is None:
+        input_fn = input
+
+    while True:
+        print_menu()
+        try:
+            value = input_fn("\n请选择工具: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n主程序已退出。")
+            return 0
+
+        if value.lower() == "q":
+            print("主程序已退出。")
+            return 0
+
+        code = run_selected_tool(value, runner=runner)
+        if code == 0:
+            print("\n[主菜单] 工具阶段已结束，可以继续选择下一件工具。")
+        elif code in (2, 3, 4):
+            print("[主菜单] 请重新选择工具。")
+        else:
+            print(f"\n[主菜单] 工具阶段异常结束（代码 {code}），设备已清理；可以重试或退出。")
+
+
+def main() -> int:
+    args = parse_args()
+    if args.list:
+        print_menu()
+        return 0
+    if args.tool is not None:
+        if args.tool.lower() == "q":
+            return 0
+        return run_selected_tool(args.tool)
+    return interactive_menu()
 
 
 if __name__ == "__main__":
