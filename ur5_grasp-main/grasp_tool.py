@@ -134,10 +134,10 @@ SCREWDRIVER_TEST_LIFT_M = 0.050
 SCREWDRIVER_TARGET_SHIFT_MAX_M = 0.030
 SCREWDRIVER_R_START_TOL_M = 0.015
 SUPPORT_PLANE_SHIFT_MAX_M = 0.008
-MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.008
+MIN_GRASP_TCP_PLANE_CLEARANCE_M = 0.005
 # The projected mask slightly overestimates this screwdriver's handle diameter.
 # Lower the TCP by 3 mm from the nominal cylinder midpoint while retaining the
-# independent 8 mm support-plane clearance gate below.
+# independent 5 mm support-plane clearance gate below.
 SCREWDRIVER_GRASP_CENTER_BIAS_M = -0.003
 VALIDATION_DIR = SCRIPT_ROOT.parent / "outputs" / "validation"
 POSITION_LABELS = {
@@ -201,7 +201,7 @@ TAPE_MEASURE_TEST_CLOSE_POS = 11000
 TAPE_MEASURE_TEST_GRIP_FORCE = 25
 TAPE_MEASURE_TEST_TORQUE_MIN = 80
 # 实机侧视确认卷尺夹持点高于壳体中部。只修正卷尺夹持中心，并由通用
-# 8mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
+# 5mm 支撑面净空门槛限制最低位置；相机标定和固定支撑面保持不变。
 TAPE_MEASURE_GRASP_CENTER_BIAS_M = -0.008
 PLIERS_TEST_CLOSE_POS = 11000
 PLIERS_TEST_GRIP_FORCE = 20
@@ -264,6 +264,7 @@ def main():
             "close_position": PLIERS_TEST_CLOSE_POS,
             "grip_force": PLIERS_TEST_GRIP_FORCE,
             "torque_min": PLIERS_TEST_TORQUE_MIN,
+            "contact_mode": "both",
             "requires_angle": True,
         }
     profile_required = (
@@ -1855,6 +1856,8 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
                   else grip_profile["grip_force"])
     torque_min = (GRIP_TORQUE_MIN if grip_profile is None
                   else grip_profile["torque_min"])
+    contact_mode = ("either" if grip_profile is None
+                    else grip_profile.get("contact_mode", "either"))
     tool_label = "螺丝刀" if grip_profile is None else grip_profile.get("tool_label", "工具")
     final = target.copy()
     final[2] = float(grasp_tcp_z)
@@ -1903,7 +1906,8 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
         torque_reached = robot.read_torque_reached()
         torque_current = robot.read_torque_current()
         contact_confirmed = grip_contact_confirmed(
-            torque_reached, torque_current, torque_min)
+            torque_reached, torque_current, torque_min,
+            mode=contact_mode)
         if not contact_confirmed:
             print("[夹持失败] reached=%s torque=%s command_position=%s；"
                   "张开并退回安全高度，不抬升工具。" %
@@ -1935,10 +1939,16 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
         return False
 
 
-def grip_contact_confirmed(torque_reached, torque_current, torque_min):
+def grip_contact_confirmed(torque_reached, torque_current, torque_min,
+                           mode="either"):
     """Confirm low-force contact from the gripper's torque feedback."""
-    return (int(torque_reached) == 1 or
-            int(torque_current) >= int(torque_min))
+    reached = int(torque_reached) == 1
+    current_high = int(torque_current) >= int(torque_min)
+    if mode == "both":
+        return reached and current_high
+    if mode != "either":
+        raise ValueError("unknown gripper contact confirmation mode")
+    return reached or current_high
 
 
 def attempt_descent(robot, grasp_preview, current_support_plane, calibration=None):
