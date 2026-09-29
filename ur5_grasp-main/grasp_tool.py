@@ -195,6 +195,8 @@ GRIP_SPEED = 50
 GRIP_FORCE = 50               # 力矩百分比(≤100)，过低压不扁
 GRIP_OPEN_SPEED = 100
 GRIP_OPEN_FORCE = 40
+GRIP_CONTACT_CONFIRM_SAMPLES = 20
+GRIP_CONTACT_CONFIRM_INTERVAL_S = 0.10
 # 螺丝刀使用力度35的低力夹持，以减少浅接触抬升后的滑落。实机细手柄接触时
 # 可能只报告约38的实时力矩，因此仍使用30作为反馈下限；严格模式还要求接触
 # 标志同时成立。夹爪的 position 寄存器会回显命令值，不能用于判断接触。
@@ -1914,11 +1916,10 @@ def execute_guarded_grasp(robot, target_xyz_m, grasp_tcp_z, support_plane_z_m,
         closed_position = robot.grip(close_position, GRIP_SPEED, grip_force)
         if closed_position == -1:
             raise RuntimeError("gripper did not close")
-        torque_reached = robot.read_torque_reached()
-        torque_current = robot.read_torque_current()
-        contact_confirmed = grip_contact_confirmed(
-            torque_reached, torque_current, torque_min,
-            mode=contact_mode)
+        contact_confirmed, torque_reached, torque_current = wait_for_grip_contact(
+            robot, torque_min, mode=contact_mode,
+            max_samples=GRIP_CONTACT_CONFIRM_SAMPLES,
+            poll_interval_s=GRIP_CONTACT_CONFIRM_INTERVAL_S)
         if not contact_confirmed:
             print("[夹持失败] reached=%s torque=%s command_position=%s；"
                   "张开并退回安全高度，不抬升工具。" %
@@ -1963,6 +1964,22 @@ def grip_contact_confirmed(torque_reached, torque_current, torque_min,
     if mode != "either":
         raise ValueError("unknown gripper contact confirmation mode")
     return reached or current >= int(torque_min)
+
+
+def wait_for_grip_contact(robot, torque_min, mode="either", max_samples=20,
+                          poll_interval_s=0.10):
+    """Wait briefly for the fingers to reach the object before rejecting it."""
+    samples = max(1, int(max_samples))
+    reached = -1
+    current = -1
+    for index in range(samples):
+        reached = robot.read_torque_reached()
+        current = robot.read_torque_current()
+        if grip_contact_confirmed(reached, current, torque_min, mode=mode):
+            return True, reached, current
+        if index + 1 < samples and poll_interval_s > 0:
+            time.sleep(float(poll_interval_s))
+    return False, reached, current
 
 
 def attempt_descent(robot, grasp_preview, current_support_plane, calibration=None):
